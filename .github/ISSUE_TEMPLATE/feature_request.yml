@@ -1,0 +1,24 @@
+name: Design proposal
+description: Propose a focused public-core improvement.
+title: "proposal: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Which concrete public-core limitation should be addressed?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed boundary
+      description: Describe the smallest change, contracts affected, and deterministic verification.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and risks
+      description: Include ABI, safety, dependency, and compatibility consequences.

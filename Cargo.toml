@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/boot-protocol",
+    "crates/bootloader",
+    "crates/kernel",
+    "crates/kernel-image",
+    "crates/xtask",
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["Pechlof Erik"]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/PEKYDEV/UnnamedOS-Core"
+rust-version = "1.98"

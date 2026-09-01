@@ -1,0 +1,19 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+boot-protocol = { path = "../boot-protocol" }
+
+[[bin]]
+name = "unnamedos-kernel"
+path = "src/main.rs"
+test = false
+bench = false

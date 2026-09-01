@@ -1,0 +1,25 @@
+/target/
+/.phase0/
+/artifacts/
+/logs/
+*.fd
+*.img
+*.iso
+*.log
+
+# Editor and operating-system state
+/.vscode/
+/.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519

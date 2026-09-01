@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.md text eol=lf whitespace=-trailing-space
+
+*.fd binary
+*.img binary
+*.iso binary

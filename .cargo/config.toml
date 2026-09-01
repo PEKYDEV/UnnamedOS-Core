@@ -1,0 +1,5 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[target.x86_64-unknown-none]
+rustflags = ["-C", "no-redzone=yes"]

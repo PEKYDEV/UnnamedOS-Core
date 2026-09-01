@@ -1,0 +1,31 @@
+name: core-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Select pinned Rust toolchain
+        run: rustup show
+      - name: Run host checks and cross-target builds
+        run: cargo xtask check
+      - name: Validate workspace metadata and dependencies
+        run: |
+          cargo metadata --no-deps --format-version 1
+          cargo tree --workspace --edges normal
+      - name: Inspect bootstrap kernel artifact
+        run: |
+          cargo xtask build-kernel
+          cargo xtask inspect-kernel
