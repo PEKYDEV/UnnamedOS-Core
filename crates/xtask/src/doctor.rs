@@ -639,10 +639,9 @@ mod tests {
 
     #[test]
     fn qemu_path_candidates_precede_known_installs() {
-        let path_value =
-            env::join_paths([r"C:\Path QEMU", r"D:\Other"]).expect("test PATH must be valid");
-        let candidates =
-            qemu_candidates(None, Some(path_value), &[PathBuf::from(r"C:\Known QEMU")]);
+        let path_value = env::join_paths(["Path QEMU", "Other"])
+            .expect("platform-neutral test PATH must be valid");
+        let candidates = qemu_candidates(None, Some(path_value), &[PathBuf::from("Known QEMU")]);
 
         assert_eq!(candidates[0].source, ResolutionSource::Path);
         assert_eq!(
