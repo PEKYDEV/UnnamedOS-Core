@@ -105,6 +105,8 @@ Pixelformátum `1`: RGBX8888; `2`: BGRX8888. Mindkettő 4 byte/pixel.
 | 9 | framebuffer rezerváció |
 | 10 | hibás vagy még el nem fogadott memória |
 | 11 | persistent memória |
+| 12 | dedikált bootstrap stack |
+| 13 | jövőbeli saját lapozótábla-frame |
 
 A Phase 1D-E nem változtatja meg a 128 byte-os `BootInfo` vagy a 32 byte-os minimum descriptor layoutot. A fenti, korábban név nélkül hagyott `kind` értékeket rögzíti. Ismeretlen érték nem értelmezhető használható memóriaként.
 
@@ -117,6 +119,7 @@ A Phase 1D-F a sikeres firmware-exithez tartozó mapból ugyanebbe a változatla
 - A loader birtokolja és a kernelhandoff idejére életben tartja az összes hivatkozott memóriát.
 - A pontos struktúrák a dependency-mentes, `no_std`, unsafe kódot tiltó `boot-protocol` crate-ben vannak.
 - Layout-, méret-, alignment-, verzió- és hibás bemeneti hosttesztek kötelezők.
+- A kötelező page-table ownership metadata nem fér biztonságosan v1 minor bővítésbe; az [ADR-0013](0013-page-table-planner-and-ownership.md) ezért jövőbeli major 2 envelope-ot rögzít, miközben a v1.0 emitter változatlan.
 
 ## Ellenőrzés
 

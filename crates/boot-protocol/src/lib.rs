@@ -7,6 +7,18 @@
 #![doc = "physical addresses are opaque `u64` values and validation never"]
 #![doc = "dereferences them. Consumers must validate `BootInfo` before use."]
 
+mod extensions;
+
+pub use extensions::{
+    BOOT_ENVELOPE_ABI_MAJOR, BOOT_ENVELOPE_ABI_MINOR, EXTENSION_FLAG_REQUIRED,
+    EXTENSION_HEADER_SIZE, EXTENSION_KIND_PAGE_TABLE_OWNERSHIP, EXTENSION_VERSION_1,
+    ExtensionError, ExtensionHeader, ExtensionSummary, OWNED_PAGE_TABLE_FRAME_SIZE,
+    OwnedPageTableFrame, PAGE_TABLE_HIERARCHY_VERSION, PAGE_TABLE_OWNERSHIP_SIZE,
+    PAGE_TABLE_PHYSICAL_CAP, PAGE_TABLE_STATE_FINAL, PAGE_TABLE_STATE_TRANSITIONAL,
+    PageTableOwnership, ValidatedPageTableOwnership, validate_extension_area,
+    validate_page_table_frames,
+};
+
 /// ASCII `UNOSBOOT` interpreted as a little-endian `u64`.
 pub const ABI_MAGIC: u64 = u64::from_le_bytes(*b"UNOSBOOT");
 pub const ABI_MAJOR: u16 = 1;
@@ -35,6 +47,7 @@ pub const MEMORY_KIND_FRAMEBUFFER: u32 = 9;
 pub const MEMORY_KIND_UNUSABLE: u32 = 10;
 pub const MEMORY_KIND_PERSISTENT: u32 = 11;
 pub const MEMORY_KIND_BOOTSTRAP_STACK: u32 = 12;
+pub const MEMORY_KIND_PAGE_TABLE: u32 = 13;
 
 /// Raw wire header. Reserved fields and all currently undefined flags are zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

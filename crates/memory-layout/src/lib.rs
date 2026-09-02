@@ -7,6 +7,21 @@
 
 use core::mem::{align_of, size_of};
 
+mod cpu;
+mod frame_owner;
+mod page_table;
+
+pub use cpu::{CpuCapabilities, CpuCapabilityError};
+pub use frame_owner::{
+    FrameBackend, FrameOwnerBuildError, FrameOwnerCause, FrameOwnerError, PageTableFrameOwner,
+    TransferredPageTableFrames,
+};
+pub use page_table::{
+    ConstructionPlan, EntryFlags, EntryTarget, EntryTargetKind, FrameAssignments, FrameSlot,
+    PageTablePlanError, PhysicalFrame, PlanMode, PlannedEntry, PlannedTable, TableIndex,
+    TableLevel, TransitionRemoval, virtual_address_indices,
+};
+
 pub const PAGE_SIZE: u64 = 4096;
 pub const LOW_CANONICAL_END: u64 = 0x0000_8000_0000_0000;
 pub const HIGH_CANONICAL_START: u64 = 0xffff_8000_0000_0000;

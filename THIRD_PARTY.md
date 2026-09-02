@@ -20,7 +20,7 @@ The project-owned code in UnnamedOS Core is licensed under Apache-2.0. Cargo dep
 
 Build-only procedural macro dependencies are `uefi-macros 0.19.0`, `ptr_meta_derive 0.3.2`, `proc-macro2 1.0.107`, `quote 1.0.47`, `syn 2.0.119`, `syn 3.0.4`, and `unicode-ident 1.0.24`. They are licensed under MIT, Apache-2.0, or both; `unicode-ident` additionally carries Unicode-3.0 terms.
 
-The workspace-owned `boot-protocol`, `kernel-image`, `memory-layout`, and `xtask` crates have no external runtime dependencies. `memory-layout` is an allocator-free `no_std` acceptance contract and adds no dependency or license exception. The `kernel` depends only on `boot-protocol`. No QEMU or firmware binary is distributed by this repository.
+The workspace-owned `boot-protocol`, `kernel-image`, `memory-layout`, and `xtask` crates have no external runtime dependencies. The page-table planner, frame owner, extension parser, and CPU capability contract are allocator-free project code and add no dependency or license exception. The `kernel` depends only on `boot-protocol`. No QEMU or firmware binary is distributed by this repository.
 
 ## Scoped MPL-2.0 exception: `ucs2 0.3.3`
 

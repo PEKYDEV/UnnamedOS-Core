@@ -10,4 +10,6 @@ Phase 1J-A accepts a four-level, 4 KiB, 48-bit-canonical address-space contract.
 
 The loader will allocate and own the initial hierarchy until the non-returning CR3 handoff; the kernel will then remove transition mappings before enabling interrupts or allocators. The dependency-free `memory-layout` crate validates this plan without allocation, address dereferences, privileged instructions, or unsafe code. Runtime page-table construction and CR3 modification are not implemented yet.
 
+Phase 1J-B deterministically expands validated mappings into an inactive PML4/PDPT/PD/PT plan with fixed capacities, monotonic frame slots, exact parent indices, leaf flags, canonical serialization, and one lower-PML4 removal operation per temporary alias region. A backend-neutral owner proves exact allocation, zeroing, reverse rollback, retryable release, and explicit transfer. Required ownership metadata is reserved for a future major-2 linear extension envelope so the current 128-byte v1.0 BootInfo remains unchanged and older kernels reject the new contract. Production materialization and activation remain unimplemented.
+
 Normative decisions and exact layouts are recorded in [`docs/adr`](adr).

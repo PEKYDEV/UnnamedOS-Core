@@ -65,7 +65,7 @@ A lapozótábla-frame-eket a kernel a direct map pontos `DIRECT_MAP_START + phys
 
 ### BootInfo és ownership metadata
 
-A jelenlegi 128 byte-os BootInfo és reserved mezői változatlanok. A későbbi page-table buildernek explicit, verziózott módon kell átadnia a root fizikai címét és az összes birtokolt table-frame rezervációját. Ezt egy következő ABI/ownership ADR dönti el; reserved mező nem használható fel csendben. A jövőbeli RDI BootInfo-pointer magas direct-map alias lehet, miközben a wire struktúrában tárolt címek továbbra is fizikai címek.
+A jelenlegi 128 byte-os BootInfo és reserved mezői változatlanok. Az [ADR-0013](0013-page-table-planner-and-ownership.md) a root fizikai címét és a table-frame listát jövőbeli major 2, lineáris extension-envelope-ban adja át; reserved mező nem használható fel csendben. A jövőbeli RDI BootInfo-pointer magas direct-map alias lehet, miközben a wire struktúrában tárolt címek továbbra is fizikai címek.
 
 ### Tiszta acceptance contract
 
@@ -84,7 +84,7 @@ LA57, PCID, SMEP, SMAP, 2 MiB/1 GiB huge page, KASLR, demand paging, copy-on-wri
 - A QEMU referenciaút és a Dell cél ugyanazt a determinisztikus négy szintű szerződést használhatja; hardverfüggő cím vagy PAT-feltételezés nincs beégetve.
 - A magas kernel és a userspace külön canonical félben van, így a későbbi mikrokernel address space-ek alsó fele izolálható.
 - A direct map egyszerűsíti a frame- és lapozótábla-kezelést, de csak explicit RAM- és aliaspolicy mellett.
-- A következő implementációs csomag még nem válthat CR3-at: előbb fix kapacitású lapozótábla-konstrukciós planner/owner és ABI-ownership döntés szükséges.
+- Az ADR-0013 már rögzíti a fix kapacitású konstrukciós tervet, frame ownert és ABI-ownership döntést; a következő implementációs csomag inaktív UEFI frame-allokációt és bounded materializálást végezhet, de még nem válthat CR3-at.
 
 ## Ellenőrzés
 

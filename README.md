@@ -37,7 +37,7 @@ UnnamedOS follows a human-centered development process in which AI serves as an 
 
 Treat all current releases as experimental. Please review [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), never through a public issue.
 
-The accepted Phase 1J-A layout fixes canonical regions, permissions, guards, a bounded RAM-only direct map, and the temporary identity-map budget. It does not yet construct page tables or modify CR3. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Phase 1J-B adds a deterministic inactive PML4/PDPT/PD/PT construction plan, rollback-safe frame ownership, a pure CPU capability gate, and a future major-2 ownership envelope. It does not allocate production table frames, write page-table memory, probe CPU state, or modify CR3. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License and names
 
