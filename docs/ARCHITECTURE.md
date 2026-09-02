@@ -6,4 +6,8 @@ The loader and kernel communicate only through `boot-protocol`, a `no_std`, C-co
 
 The current bootstrap kernel validates the handoff, emits deterministic serial evidence, and terminates the reference QEMU scenario. It intentionally provides no scheduler, allocator-backed runtime, driver framework, userspace, or graphical shell.
 
+Phase 1J-A accepts a four-level, 4 KiB, 48-bit-canonical address-space contract. The lower half is reserved for future userspace. The higher half contains a 64 TiB RAM-only direct map at `0xffff800000000000..0xffffc00000000000`, dedicated kernel-service, MMIO and framebuffer regions, a kernel-image window at `0xffffffff80000000..0xffffffffc0000000`, and kernel-local space. Kernel mappings are supervisor-only and W^X; MMIO/framebuffer mappings are initially uncached. The transition permits only one RX trampoline page plus the 16-page RW+NX bootstrap stack below 4 GiB, and the final plan permits no low mapping.
+
+The loader will allocate and own the initial hierarchy until the non-returning CR3 handoff; the kernel will then remove transition mappings before enabling interrupts or allocators. The dependency-free `memory-layout` crate validates this plan without allocation, address dereferences, privileged instructions, or unsafe code. Runtime page-table construction and CR3 modification are not implemented yet.
+
 Normative decisions and exact layouts are recorded in [`docs/adr`](adr).

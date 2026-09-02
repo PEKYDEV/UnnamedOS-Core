@@ -10,6 +10,7 @@ This project is early-stage systems software. It is not suitable for production 
 - thin UEFI loader and separately linked ELF64 bootstrap kernel
 - bounded ELF parsing, fixed-address segment loading, and explicit ownership transfer
 - allocator-free memory-map and framebuffer metadata preparation
+- dependency-free, host-tested contract for the first owned higher-half address space
 - deterministic QEMU q35/OVMF tests through the first kernel handoff
 - host tests, formatting, Clippy, cross-target builds, and artifact inspection through `xtask`
 
@@ -36,7 +37,7 @@ UnnamedOS follows a human-centered development process in which AI serves as an 
 
 Treat all current releases as experimental. Please review [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), never through a public issue.
 
-The near-term roadmap focuses on hardening the loader/kernel boundary and then establishing the smallest reviewed kernel runtime. See [docs/ROADMAP.md](docs/ROADMAP.md).
+The accepted Phase 1J-A layout fixes canonical regions, permissions, guards, a bounded RAM-only direct map, and the temporary identity-map budget. It does not yet construct page tables or modify CR3. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License and names
 

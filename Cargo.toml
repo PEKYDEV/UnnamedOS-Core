@@ -4,6 +4,7 @@ members = [
     "crates/bootloader",
     "crates/kernel",
     "crates/kernel-image",
+    "crates/memory-layout",
     "crates/xtask",
 ]
 resolver = "2"
