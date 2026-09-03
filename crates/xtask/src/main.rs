@@ -7,7 +7,7 @@ mod uefi;
 use std::env;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: cargo xtask <check|doctor|build-uefi|run-uefi|test-uefi|test-exit-boot-services|test-kernel-handoff|test-page-tables|test-cpu-readiness|build-kernel|inspect-kernel|build-boot>";
+const USAGE: &str = "usage: cargo xtask <check|doctor|build-uefi|run-uefi|test-uefi|test-exit-boot-services|test-kernel-handoff|test-page-tables|test-cpu-readiness|build-kernel|inspect-kernel|build-higher-kernel|inspect-higher-kernel|verify-higher-kernel|build-boot>";
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -43,6 +43,9 @@ fn main() -> ExitCode {
         Some("test-cpu-readiness") => command_result(uefi::test_cpu_readiness()),
         Some("build-kernel") => command_result(kernel::build_kernel()),
         Some("inspect-kernel") => command_result(kernel::inspect_kernel()),
+        Some("build-higher-kernel") => command_result(kernel::build_higher_kernel()),
+        Some("inspect-higher-kernel") => command_result(kernel::inspect_higher_kernel()),
+        Some("verify-higher-kernel") => command_result(kernel::verify_higher_kernel_reproducible()),
         Some("build-boot") => command_result(kernel::build_boot()),
         _ => {
             eprintln!("{USAGE}");

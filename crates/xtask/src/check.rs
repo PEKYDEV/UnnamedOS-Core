@@ -81,6 +81,26 @@ pub fn run() -> Result<(), String> {
             "warnings",
         ],
     )?;
+    run_step_with_env(
+        "higher-half kernel clippy",
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "kernel",
+            "--bin",
+            "unnamedos-kernel",
+            "--features",
+            "higher-half",
+            "--target",
+            "x86_64-unknown-none",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        "RUSTFLAGS",
+        "-C no-redzone=yes -C code-model=kernel",
+    )?;
     run_step(
         "UEFI loader clippy",
         "cargo",
@@ -218,6 +238,29 @@ fn run_step(label: &str, program: &str, args: &[&str]) -> Result<(), String> {
         .status()
         .map_err(|error| format!("could not start `{program}`: {error}"))?;
 
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{program} {}` exited with {status}",
+            args.join(" ")
+        ))
+    }
+}
+
+fn run_step_with_env(
+    label: &str,
+    program: &str,
+    args: &[&str],
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    println!("==> {label}");
+    let status = Command::new(program)
+        .args(args)
+        .env(key, value)
+        .status()
+        .map_err(|error| format!("could not start `{program}`: {error}"))?;
     if status.success() {
         Ok(())
     } else {

@@ -12,6 +12,10 @@ build = "build.rs"
 [dependencies]
 boot-protocol = { path = "../boot-protocol" }
 
+[features]
+default = []
+higher-half = []
+
 [[bin]]
 name = "unnamedos-kernel"
 path = "src/main.rs"

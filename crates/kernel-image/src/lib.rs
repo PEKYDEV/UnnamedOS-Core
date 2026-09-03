@@ -9,6 +9,11 @@ pub const SECTION_HEADER_SIZE: u16 = 64;
 pub const MAX_PROGRAM_HEADERS: u16 = 128;
 pub const BOOTSTRAP_LINK_ADDRESS: u64 = 0x0020_0000;
 pub const BOOTSTRAP_PAGE_SIZE: u64 = 4096;
+pub const BOOTSTRAP_PHYSICAL_END: u64 = 0x0420_0000;
+pub const HIGHER_HALF_VIRTUAL_OFFSET: u64 = 0xffff_ffff_8000_0000;
+pub const HIGHER_HALF_LINK_ADDRESS: u64 = 0xffff_ffff_8020_0000;
+pub const KERNEL_IMAGE_VIRTUAL_START: u64 = 0xffff_ffff_8000_0000;
+pub const KERNEL_IMAGE_VIRTUAL_END: u64 = 0xffff_ffff_c000_0000;
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -16,8 +21,12 @@ const PT_INTERP: u32 = 3;
 const PT_TLS: u32 = 7;
 const PF_EXECUTE: u32 = 1;
 const PF_WRITE: u32 = 2;
+const PF_READ: u32 = 4;
+const SHT_SYMTAB: u32 = 2;
 const SHT_RELA: u32 = 4;
 const SHT_REL: u32 = 9;
+const SHT_DYNSYM: u32 = 11;
+const ELF64_SYMBOL_SIZE: u64 = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -55,8 +64,11 @@ pub enum ValidationError {
     NonCanonicalAddress,
     PhysicalVirtualAddressMismatch,
     OverlappingLoadSegments,
+    OverlappingVirtualLoadSegments,
     EntryOutsideExecutableSegment,
     InvalidPageSize,
+    InvalidSymbolTable,
+    UndefinedRuntimeSymbol,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +81,26 @@ pub enum BootstrapValidationError {
     MissingReadOnlySegment,
     MissingWritableSegment,
     MissingBss,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HigherHalfValidationError {
+    Elf(ValidationError),
+    UnexpectedEntry,
+    UnexpectedPhysicalStart,
+    UnexpectedVirtualStart,
+    MisalignedLoadSegment,
+    PhysicalOutsideBootstrapWindow,
+    VirtualOutsideKernelRegion,
+    InconsistentTranslationOffset,
+    InvalidSegmentPermissions,
+    MissingExecuteSegment,
+    MissingReadOnlySegment,
+    MissingWritableSegment,
+    MissingBss,
+    EntryTranslationOverflow,
+    EntryWithoutPhysicalBacking,
+    SpanOverflow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,7 +184,8 @@ pub struct LoadSegment {
     file_offset: u64,
     file_size: u64,
     memory_size: u64,
-    address: u64,
+    physical_address: u64,
+    virtual_address: u64,
     alignment: u64,
     flags: u32,
 }
@@ -171,7 +204,15 @@ impl LoadSegment {
     }
 
     pub const fn address(self) -> u64 {
-        self.address
+        self.physical_address
+    }
+
+    pub const fn physical_address(self) -> u64 {
+        self.physical_address
+    }
+
+    pub const fn virtual_address(self) -> u64 {
+        self.virtual_address
     }
 
     pub const fn alignment(self) -> u64 {
@@ -199,10 +240,10 @@ impl LoadSegment {
             return Err(ValidationError::InvalidPageSize);
         }
         let end = self
-            .address
+            .physical_address
             .checked_add(self.memory_size)
             .ok_or(ValidationError::SegmentMemoryRangeOverflow)?;
-        let first_page = self.address / page_size;
+        let first_page = self.physical_address / page_size;
         let last_page = (end - 1) / page_size;
         Ok(last_page - first_page + 1)
     }
@@ -214,6 +255,8 @@ pub struct ValidatedImage<'a> {
     load_count: u16,
     load_start: u64,
     load_end: u64,
+    virtual_load_start: u64,
+    virtual_load_end: u64,
 }
 
 impl<'a> ValidatedImage<'a> {
@@ -227,6 +270,8 @@ impl<'a> ValidatedImage<'a> {
         let mut load_count = 0_u16;
         let mut load_start = u64::MAX;
         let mut load_end = 0_u64;
+        let mut virtual_load_start = u64::MAX;
+        let mut virtual_load_end = 0_u64;
         let mut entry_is_executable = false;
 
         for index in 0..raw.header.program_header_count {
@@ -238,32 +283,46 @@ impl<'a> ValidatedImage<'a> {
                 PT_DYNAMIC => return Err(ValidationError::DynamicSegment),
                 PT_TLS => return Err(ValidationError::TlsSegment),
                 PT_LOAD => {
-                    let end = validate_load_segment(bytes, program)?;
+                    let (physical_end, virtual_end) = validate_load_segment(bytes, program)?;
                     for previous_index in 0..index {
                         let previous = raw
                             .program_header(previous_index)
                             .ok_or(ValidationError::ProgramHeaderTableOutsideFile)?;
                         if previous.segment_type == PT_LOAD {
-                            let previous_end = previous
+                            let previous_physical_end = previous
                                 .physical_address
                                 .checked_add(previous.memory_size)
                                 .ok_or(ValidationError::SegmentMemoryRangeOverflow)?;
                             if ranges_overlap(
                                 previous.physical_address,
-                                previous_end,
+                                previous_physical_end,
                                 program.physical_address,
-                                end,
+                                physical_end,
                             ) {
                                 return Err(ValidationError::OverlappingLoadSegments);
+                            }
+                            let previous_virtual_end = previous
+                                .virtual_address
+                                .checked_add(previous.memory_size)
+                                .ok_or(ValidationError::SegmentMemoryRangeOverflow)?;
+                            if ranges_overlap(
+                                previous.virtual_address,
+                                previous_virtual_end,
+                                program.virtual_address,
+                                virtual_end,
+                            ) {
+                                return Err(ValidationError::OverlappingVirtualLoadSegments);
                             }
                         }
                     }
                     load_count += 1;
                     load_start = load_start.min(program.physical_address);
-                    load_end = load_end.max(end);
+                    load_end = load_end.max(physical_end);
+                    virtual_load_start = virtual_load_start.min(program.virtual_address);
+                    virtual_load_end = virtual_load_end.max(virtual_end);
                     if program.flags & PF_EXECUTE != 0
                         && raw.header.entry >= program.virtual_address
-                        && raw.header.entry < end
+                        && raw.header.entry < virtual_end
                     {
                         entry_is_executable = true;
                     }
@@ -284,6 +343,8 @@ impl<'a> ValidatedImage<'a> {
             load_count,
             load_start,
             load_end,
+            virtual_load_start,
+            virtual_load_end,
         })
     }
 
@@ -305,6 +366,10 @@ impl<'a> ValidatedImage<'a> {
 
     pub const fn load_address_range(&self) -> (u64, u64) {
         (self.load_start, self.load_end)
+    }
+
+    pub const fn virtual_load_address_range(&self) -> (u64, u64) {
+        (self.virtual_load_start, self.virtual_load_end)
     }
 
     pub fn load_segments(&self) -> LoadSegments<'a> {
@@ -331,6 +396,11 @@ pub fn validate_bootstrap_image(
     let mut has_writable = false;
     let mut has_bss = false;
     for segment in image.load_segments() {
+        if segment.physical_address() != segment.virtual_address() {
+            return Err(BootstrapValidationError::Elf(
+                ValidationError::PhysicalVirtualAddressMismatch,
+            ));
+        }
         if segment.alignment() != BOOTSTRAP_PAGE_SIZE
             || segment.address() % BOOTSTRAP_PAGE_SIZE != 0
             || segment.file_offset() % BOOTSTRAP_PAGE_SIZE != 0
@@ -358,6 +428,149 @@ pub fn validate_bootstrap_image(
     Ok(image)
 }
 
+#[derive(Clone, Copy)]
+pub struct ValidatedHigherHalfImage<'a> {
+    image: ValidatedImage<'a>,
+    physical_entry: u64,
+}
+
+impl<'a> ValidatedHigherHalfImage<'a> {
+    pub const fn image(&self) -> &ValidatedImage<'a> {
+        &self.image
+    }
+
+    pub const fn virtual_entry(&self) -> u64 {
+        self.image.entry()
+    }
+
+    pub const fn physical_entry(&self) -> u64 {
+        self.physical_entry
+    }
+
+    pub const fn translation_offset(&self) -> u64 {
+        HIGHER_HALF_VIRTUAL_OFFSET
+    }
+
+    pub const fn physical_load_range(&self) -> (u64, u64) {
+        self.image.load_address_range()
+    }
+
+    pub const fn virtual_load_range(&self) -> (u64, u64) {
+        self.image.virtual_load_address_range()
+    }
+
+    pub fn load_segments(&self) -> LoadSegments<'a> {
+        self.image.load_segments()
+    }
+
+    pub fn total_physical_load_size(&self) -> Result<u64, HigherHalfValidationError> {
+        self.load_segments().try_fold(0_u64, |total, segment| {
+            total
+                .checked_add(segment.memory_size())
+                .ok_or(HigherHalfValidationError::SpanOverflow)
+        })
+    }
+}
+
+pub fn validate_higher_half_image(
+    bytes: &[u8],
+) -> Result<ValidatedHigherHalfImage<'_>, HigherHalfValidationError> {
+    let image = ValidatedImage::parse(bytes).map_err(HigherHalfValidationError::Elf)?;
+    if image.entry() != HIGHER_HALF_LINK_ADDRESS {
+        return Err(HigherHalfValidationError::UnexpectedEntry);
+    }
+    if image.load_address_range().0 != BOOTSTRAP_LINK_ADDRESS {
+        return Err(HigherHalfValidationError::UnexpectedPhysicalStart);
+    }
+    if image.virtual_load_address_range().0 != HIGHER_HALF_LINK_ADDRESS {
+        return Err(HigherHalfValidationError::UnexpectedVirtualStart);
+    }
+
+    let mut has_execute = false;
+    let mut has_read_only = false;
+    let mut has_writable = false;
+    let mut has_bss = false;
+    for segment in image.load_segments() {
+        if segment.alignment() != BOOTSTRAP_PAGE_SIZE
+            || !segment
+                .physical_address()
+                .is_multiple_of(BOOTSTRAP_PAGE_SIZE)
+            || !segment
+                .virtual_address()
+                .is_multiple_of(BOOTSTRAP_PAGE_SIZE)
+            || !segment.file_offset().is_multiple_of(BOOTSTRAP_PAGE_SIZE)
+        {
+            return Err(HigherHalfValidationError::MisalignedLoadSegment);
+        }
+        let physical_end = segment
+            .physical_address()
+            .checked_add(segment.memory_size())
+            .ok_or(HigherHalfValidationError::SpanOverflow)?;
+        let virtual_end = segment
+            .virtual_address()
+            .checked_add(segment.memory_size())
+            .ok_or(HigherHalfValidationError::SpanOverflow)?;
+        if segment.physical_address() < BOOTSTRAP_LINK_ADDRESS
+            || physical_end > BOOTSTRAP_PHYSICAL_END
+        {
+            return Err(HigherHalfValidationError::PhysicalOutsideBootstrapWindow);
+        }
+        if segment.virtual_address() < KERNEL_IMAGE_VIRTUAL_START
+            || virtual_end > KERNEL_IMAGE_VIRTUAL_END
+        {
+            return Err(HigherHalfValidationError::VirtualOutsideKernelRegion);
+        }
+        if segment
+            .virtual_address()
+            .checked_sub(segment.physical_address())
+            != Some(HIGHER_HALF_VIRTUAL_OFFSET)
+        {
+            return Err(HigherHalfValidationError::InconsistentTranslationOffset);
+        }
+        let flags = segment.flags();
+        if flags == PF_READ | PF_EXECUTE {
+            has_execute = true;
+        } else if flags == PF_READ {
+            has_read_only = true;
+        } else if flags == PF_READ | PF_WRITE {
+            has_writable = true;
+        } else {
+            return Err(HigherHalfValidationError::InvalidSegmentPermissions);
+        }
+        has_bss |= segment.memory_size() > segment.file_size();
+    }
+    if !has_execute {
+        return Err(HigherHalfValidationError::MissingExecuteSegment);
+    }
+    if !has_read_only {
+        return Err(HigherHalfValidationError::MissingReadOnlySegment);
+    }
+    if !has_writable {
+        return Err(HigherHalfValidationError::MissingWritableSegment);
+    }
+    if !has_bss {
+        return Err(HigherHalfValidationError::MissingBss);
+    }
+    let physical_entry = image
+        .entry()
+        .checked_sub(HIGHER_HALF_VIRTUAL_OFFSET)
+        .ok_or(HigherHalfValidationError::EntryTranslationOverflow)?;
+    if !image.load_segments().any(|segment| {
+        let physical_end = segment
+            .physical_address()
+            .checked_add(segment.memory_size());
+        segment.is_executable()
+            && physical_entry >= segment.physical_address()
+            && physical_end.is_some_and(|end| physical_entry < end)
+    }) {
+        return Err(HigherHalfValidationError::EntryWithoutPhysicalBacking);
+    }
+    Ok(ValidatedHigherHalfImage {
+        image,
+        physical_entry,
+    })
+}
+
 pub struct LoadSegments<'a> {
     raw: RawImage<'a>,
     next_index: u16,
@@ -376,7 +589,8 @@ impl Iterator for LoadSegments<'_> {
                     file_offset: raw.file_offset,
                     file_size: raw.file_size,
                     memory_size: raw.memory_size,
-                    address: raw.physical_address,
+                    physical_address: raw.physical_address,
+                    virtual_address: raw.virtual_address,
                     alignment: raw.alignment,
                     flags: raw.flags,
                 });
@@ -479,11 +693,17 @@ fn validate_section_table(raw: &RawImage<'_>) -> Result<(), ValidationError> {
         if (section_type == SHT_REL || section_type == SHT_RELA) && section_size != 0 {
             return Err(ValidationError::RuntimeRelocations);
         }
+        if section_type == SHT_SYMTAB || section_type == SHT_DYNSYM {
+            validate_symbol_table(raw.bytes, offset, section_size)?;
+        }
     }
     Ok(())
 }
 
-fn validate_load_segment(bytes: &[u8], program: RawProgramHeader) -> Result<u64, ValidationError> {
+fn validate_load_segment(
+    bytes: &[u8],
+    program: RawProgramHeader,
+) -> Result<(u64, u64), ValidationError> {
     if program.memory_size == 0 {
         return Err(ValidationError::ZeroLengthLoadSegment);
     }
@@ -501,10 +721,11 @@ fn validate_load_segment(bytes: &[u8], program: RawProgramHeader) -> Result<u64,
         .physical_address
         .checked_add(program.memory_size)
         .ok_or(ValidationError::SegmentMemoryRangeOverflow)?;
-    if program.physical_address != program.virtual_address {
-        return Err(ValidationError::PhysicalVirtualAddressMismatch);
-    }
-    if !is_canonical(program.virtual_address) || !is_canonical(memory_end - 1) {
+    let virtual_end = program
+        .virtual_address
+        .checked_add(program.memory_size)
+        .ok_or(ValidationError::SegmentMemoryRangeOverflow)?;
+    if !is_canonical(program.virtual_address) || !is_canonical(virtual_end - 1) {
         return Err(ValidationError::NonCanonicalAddress);
     }
     if program.alignment > 1 && !program.alignment.is_power_of_two() {
@@ -518,7 +739,43 @@ fn validate_load_segment(bytes: &[u8], program: RawProgramHeader) -> Result<u64,
     if program.flags & (PF_WRITE | PF_EXECUTE) == (PF_WRITE | PF_EXECUTE) {
         return Err(ValidationError::WritableExecutableSegment);
     }
-    Ok(memory_end)
+    Ok((memory_end, virtual_end))
+}
+
+fn validate_symbol_table(
+    bytes: &[u8],
+    section_offset: u64,
+    section_size: u64,
+) -> Result<(), ValidationError> {
+    let file_offset = read_u64_at(bytes, section_offset + 24)
+        .ok_or(ValidationError::SectionHeaderTableOutsideFile)?;
+    let entry_size = read_u64_at(bytes, section_offset + 56)
+        .ok_or(ValidationError::SectionHeaderTableOutsideFile)?;
+    if entry_size != ELF64_SYMBOL_SIZE || !section_size.is_multiple_of(entry_size) {
+        return Err(ValidationError::InvalidSymbolTable);
+    }
+    let end = file_offset
+        .checked_add(section_size)
+        .ok_or(ValidationError::SectionHeaderTableOverflow)?;
+    if end > bytes.len() as u64 {
+        return Err(ValidationError::SectionHeaderTableOutsideFile);
+    }
+    let count = section_size / entry_size;
+    for index in 1..count {
+        let symbol = file_offset
+            .checked_add(
+                index
+                    .checked_mul(entry_size)
+                    .ok_or(ValidationError::SectionHeaderTableOverflow)?,
+            )
+            .ok_or(ValidationError::SectionHeaderTableOverflow)?;
+        let section_index =
+            read_u16_at(bytes, symbol + 6).ok_or(ValidationError::SectionHeaderTableOutsideFile)?;
+        if section_index == 0 {
+            return Err(ValidationError::UndefinedRuntimeSymbol);
+        }
+    }
+    Ok(())
 }
 
 fn parse_program_header(bytes: &[u8], offset: u64) -> Option<RawProgramHeader> {
@@ -565,4 +822,8 @@ fn read_u32_at(bytes: &[u8], offset: u64) -> Option<u32> {
 
 fn read_u64_at(bytes: &[u8], offset: u64) -> Option<u64> {
     read_u64(bytes, usize::try_from(offset).ok()?)
+}
+
+fn read_u16_at(bytes: &[u8], offset: u64) -> Option<u16> {
+    read_u16(bytes, usize::try_from(offset).ok()?)
 }

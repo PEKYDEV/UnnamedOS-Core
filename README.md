@@ -8,6 +8,7 @@ This project is early-stage systems software. It is not suitable for production 
 
 - `no_std` versioned boot-information ABI with strict host-side validation
 - thin UEFI loader and separately linked ELF64 bootstrap kernel
+- separately built and validated higher-half ELF with distinct physical and virtual addresses
 - bounded ELF parsing, fixed-address segment loading, and explicit ownership transfer
 - allocator-free memory-map and framebuffer metadata preparation
 - dependency-free, host-tested contract for the first owned higher-half address space
@@ -29,6 +30,11 @@ cargo xtask test-exit-boot-services
 cargo xtask test-kernel-handoff
 cargo xtask test-page-tables
 cargo xtask test-cpu-readiness
+cargo xtask build-kernel
+cargo xtask inspect-kernel
+cargo xtask build-higher-kernel
+cargo xtask inspect-higher-kernel
+cargo xtask verify-higher-kernel
 ```
 
 `doctor` reports optional environment prerequisites and may return a diagnostic failure when QEMU or OVMF is missing. `check` remains the host-side quality gate. The QEMU commands use deterministic serial markers and debug-exit status codes; the final handoff scenario exits with status 33 when successful.
@@ -42,6 +48,8 @@ Treat all current releases as experimental. Please review [CONTRIBUTING.md](CONT
 Phase 1J-C allocates the exact UEFI `LOADER_DATA` frames for the bounded transition plan, materializes and independently verifies all table entries, reserves every owned frame in the final boot map, and transfers inactive ownership across `ExitBootServices`. The reference plan uses five table frames. CPU probing, the complete higher-half hierarchy, BootInfo v2, and CR3 modification remain deferred. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Phase 1J-D adds a production read-only CPUID/control-state probe, pure activation-readiness policy, physical-width checks for every owned frame, and exact inherited-CR3 stability checks through `ExitBootServices`. The hierarchy remains inactive; no control register or MSR is written. See [ADR-0015](docs/adr/0015-production-cpu-probe-and-activation-readiness.md).
+
+Phase 1J-E adds a separately named higher-half ELF built with the x86-64 `kernel` code model. Its physical base remains `0x00200000`, its virtual entry is `0xffffffff80200000`, and every load segment uses the checked `0xffffffff80000000` translation offset. Host-only planning proves the dual-address copy/mapping contract and a four-frame final hierarchy. This artifact is not placed on the ESP or executed; BootInfo v1.0 and inherited paging remain unchanged. See [ADR-0016](docs/adr/0016-higher-half-elf-and-dual-address-contract.md).
 
 ## License and names
 

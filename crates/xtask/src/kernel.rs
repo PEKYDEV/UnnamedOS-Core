@@ -3,12 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use kernel_image::{BOOTSTRAP_PAGE_SIZE, LoadSegment, ValidatedImage, validate_bootstrap_image};
+use kernel_image::{
+    BOOTSTRAP_PAGE_SIZE, LoadSegment, ValidatedHigherHalfImage, ValidatedImage,
+    validate_bootstrap_image, validate_higher_half_image,
+};
 
 use crate::{sha256, uefi};
 
 const KERNEL_TARGET: &str = "x86_64-unknown-none";
 const KERNEL_BINARY: &str = "unnamedos-kernel";
+const HIGHER_KERNEL_NAME: &str = "unnamedos-kernel-higher-half.elf";
+const HIGHER_KERNEL_RUSTFLAGS: &str = "-C no-redzone=yes -C code-model=kernel";
 
 pub fn build_kernel() -> Result<(), String> {
     let staged = build_and_stage_kernel()?;
@@ -34,6 +39,38 @@ pub fn inspect_kernel() -> Result<(), String> {
     let image = validate_kernel_contract(&bytes)?;
     audit_kernel_markers(&bytes)?;
     print!("{}", render_summary(&image, sha256::digest(&bytes)));
+    Ok(())
+}
+
+pub fn build_higher_kernel() -> Result<(), String> {
+    let staged = build_and_stage_higher_kernel("higher-half")?;
+    println!("higher.contract=valid");
+    println!("higher.artifact={HIGHER_KERNEL_NAME}");
+    println!("higher.sha256={}", sha256::hex(staged.digest));
+    Ok(())
+}
+
+pub fn inspect_higher_kernel() -> Result<(), String> {
+    let path = higher_stage_path();
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("higher-half kernel artifact is unavailable: {error}"))?;
+    let image = validate_higher_contract(&bytes)?;
+    audit_kernel_markers(&bytes)?;
+    print!("{}", render_higher_summary(&image, sha256::digest(&bytes))?);
+    Ok(())
+}
+
+pub fn verify_higher_kernel_reproducible() -> Result<(), String> {
+    let first = build_higher_bytes("higher-repro-a")?;
+    let second = build_higher_bytes("higher-repro-b")?;
+    let first_digest = sha256::digest(&first);
+    let second_digest = sha256::digest(&second);
+    if first_digest != second_digest || first != second {
+        return Err("isolated higher-half kernel builds are not byte-identical".to_owned());
+    }
+    stage_higher_bytes(&first)?;
+    println!("higher.reproducible=true");
+    println!("higher.sha256={}", sha256::hex(first_digest));
     Ok(())
 }
 
@@ -105,6 +142,10 @@ struct StagedKernel {
     digest: [u8; 32],
 }
 
+struct StagedHigherKernel {
+    digest: [u8; 32],
+}
+
 fn kernel_paths() -> KernelPaths {
     let root = repository_root();
     let output_root = root.join("target").join("unnamedos");
@@ -137,6 +178,77 @@ fn build_and_stage_kernel() -> Result<StagedKernel, String> {
 
     normalize_rust_elf_os_abi(&paths.source_artifact)?;
     stage_kernel(&paths, &paths.source_artifact)
+}
+
+fn higher_build_root(label: &str) -> PathBuf {
+    repository_root()
+        .join("target")
+        .join("unnamedos-build")
+        .join(label)
+}
+
+fn higher_stage_path() -> PathBuf {
+    repository_root()
+        .join("target")
+        .join("unnamedos")
+        .join("kernel")
+        .join(HIGHER_KERNEL_NAME)
+}
+
+fn build_and_stage_higher_kernel(label: &str) -> Result<StagedHigherKernel, String> {
+    let bytes = build_higher_bytes(label)?;
+    stage_higher_bytes(&bytes)
+}
+
+fn build_higher_bytes(label: &str) -> Result<Vec<u8>, String> {
+    let target_dir = higher_build_root(label);
+    remove_directory_if_present(&target_dir)?;
+    let status = Command::new("cargo")
+        .current_dir(repository_root())
+        .env("RUSTFLAGS", HIGHER_KERNEL_RUSTFLAGS)
+        .args([
+            "build",
+            "-p",
+            "kernel",
+            "--bin",
+            KERNEL_BINARY,
+            "--features",
+            "higher-half",
+            "--target",
+            KERNEL_TARGET,
+            "--target-dir",
+        ])
+        .arg(&target_dir)
+        .status()
+        .map_err(|error| format!("could not start higher-half kernel build: {error}"))?;
+    if !status.success() {
+        return Err(format!("higher-half kernel build failed with {status}"));
+    }
+    let artifact = target_dir
+        .join(KERNEL_TARGET)
+        .join("debug")
+        .join(KERNEL_BINARY);
+    normalize_rust_elf_os_abi(&artifact)?;
+    let bytes = fs::read(&artifact)
+        .map_err(|error| format!("fresh higher-half artifact is unreadable: {error}"))?;
+    validate_higher_contract(&bytes)?;
+    audit_kernel_markers(&bytes)?;
+    Ok(bytes)
+}
+
+fn stage_higher_bytes(bytes: &[u8]) -> Result<StagedHigherKernel, String> {
+    validate_higher_contract(bytes)?;
+    let path = higher_stage_path();
+    remove_file_if_present(&path)?;
+    create_parent(&path)?;
+    fs::write(&path, bytes)
+        .map_err(|error| format!("could not stage higher-half kernel: {error}"))?;
+    let digest = sha256::digest(bytes);
+    if sha256::file_digest(&path)? != digest {
+        remove_file_if_present(&path)?;
+        return Err("higher-half kernel staging SHA-256 mismatch".to_owned());
+    }
+    Ok(StagedHigherKernel { digest })
 }
 
 fn normalize_rust_elf_os_abi(artifact: &Path) -> Result<(), String> {
@@ -204,6 +316,11 @@ fn validate_kernel_contract(bytes: &[u8]) -> Result<ValidatedImage<'_>, String> 
     Ok(image)
 }
 
+fn validate_higher_contract(bytes: &[u8]) -> Result<ValidatedHigherHalfImage<'_>, String> {
+    validate_higher_half_image(bytes)
+        .map_err(|error| format!("higher-half kernel ELF contract violation: {error:?}"))
+}
+
 fn render_summary(image: &ValidatedImage<'_>, digest: [u8; 32]) -> String {
     let mut output = String::new();
     output.push_str("contract=valid\n");
@@ -227,6 +344,84 @@ fn render_summary(image: &ValidatedImage<'_>, digest: [u8; 32]) -> String {
     output.push_str(&format!("elf.load_range={start:#018x}..{end:#018x}\n"));
     output.push_str(&format!("elf.sha256={}\n", sha256::hex(digest)));
     output
+}
+
+fn render_higher_summary(
+    image: &ValidatedHigherHalfImage<'_>,
+    digest: [u8; 32],
+) -> Result<String, String> {
+    let mut output = String::new();
+    let (physical_start, physical_end) = image.physical_load_range();
+    let (virtual_start, virtual_end) = image.virtual_load_range();
+    let virtual_span = virtual_end
+        .checked_sub(virtual_start)
+        .ok_or_else(|| "higher-half virtual span underflow".to_owned())?;
+    output.push_str("contract=higher-half-valid\n");
+    output.push_str("elf.class=ELF64\nelf.endianness=little\nelf.object_type=ET_EXEC\n");
+    output.push_str("elf.machine=EM_X86_64\nelf.dynamic=absent\nelf.relocations=absent\n");
+    output.push_str("elf.undefined_runtime_symbols=absent\n");
+    output.push_str(&format!(
+        "elf.entry.virtual={:#018x}\n",
+        image.virtual_entry()
+    ));
+    output.push_str(&format!(
+        "elf.entry.physical={:#018x}\n",
+        image.physical_entry()
+    ));
+    output.push_str(&format!(
+        "elf.translation_offset={:#018x}\n",
+        image.translation_offset()
+    ));
+    for (index, segment) in image.load_segments().enumerate() {
+        render_higher_segment(&mut output, index, segment)?;
+    }
+    output.push_str(&format!(
+        "elf.physical_range={physical_start:#018x}..{physical_end:#018x}\n"
+    ));
+    output.push_str(&format!(
+        "elf.virtual_range={virtual_start:#018x}..{virtual_end:#018x}\n"
+    ));
+    output.push_str(&format!(
+        "elf.total_physical_load_size={:#x}\n",
+        image
+            .total_physical_load_size()
+            .map_err(|error| format!("higher-half size error: {error:?}"))?
+    ));
+    output.push_str(&format!("elf.total_virtual_span={virtual_span:#x}\n"));
+    output.push_str(&format!("elf.sha256={}\n", sha256::hex(digest)));
+    Ok(output)
+}
+
+fn render_higher_segment(
+    output: &mut String,
+    index: usize,
+    segment: LoadSegment,
+) -> Result<(), String> {
+    let file_end = segment
+        .file_offset()
+        .checked_add(segment.file_size())
+        .ok_or_else(|| "validated file range overflow".to_owned())?;
+    let physical_end = segment
+        .physical_address()
+        .checked_add(segment.memory_size())
+        .ok_or_else(|| "validated physical range overflow".to_owned())?;
+    let virtual_end = segment
+        .virtual_address()
+        .checked_add(segment.memory_size())
+        .ok_or_else(|| "validated virtual range overflow".to_owned())?;
+    let flags = [
+        if segment.is_readable() { 'R' } else { '-' },
+        if segment.is_writable() { 'W' } else { '-' },
+        if segment.is_executable() { 'X' } else { '-' },
+    ];
+    output.push_str(&format!(
+        "elf.load.{index}=file:{:#018x}..{file_end:#018x},physical:{:#018x}..{physical_end:#018x},virtual:{:#018x}..{virtual_end:#018x},flags:{}{}{},align:{:#x}\n",
+        segment.file_offset(),
+        segment.physical_address(),
+        segment.virtual_address(),
+        flags[0], flags[1], flags[2], segment.alignment()
+    ));
+    Ok(())
 }
 
 fn render_segment(output: &mut String, index: usize, segment: LoadSegment) {
@@ -376,6 +571,21 @@ pub(crate) mod tests {
         bytes
     }
 
+    fn valid_higher_kernel() -> Vec<u8> {
+        let mut bytes = valid_kernel();
+        put_u64(&mut bytes, 24, kernel_image::HIGHER_HALF_LINK_ADDRESS);
+        for index in 0..3 {
+            let header = 64 + index * 56;
+            let physical = 0x200000 + index as u64 * 0x1000;
+            put_u64(
+                &mut bytes,
+                header + 16,
+                kernel_image::HIGHER_HALF_VIRTUAL_OFFSET + physical,
+            );
+        }
+        bytes
+    }
+
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -474,5 +684,20 @@ pub(crate) mod tests {
         assert!(first.contains("flags:R-X"));
         assert!(first.contains("flags:RW-"));
         assert!(first.contains("elf.sha256="));
+    }
+
+    #[test]
+    fn higher_half_summary_is_deterministic_and_path_free() {
+        let bytes = valid_higher_kernel();
+        let image = validate_higher_contract(&bytes).expect("higher contract");
+        let first = render_higher_summary(&image, sha256::digest(&bytes)).expect("summary");
+        let second = render_higher_summary(&image, sha256::digest(&bytes)).expect("summary");
+        assert_eq!(first, second);
+        assert!(first.starts_with("contract=higher-half-valid\n"));
+        assert!(first.contains("elf.entry.virtual=0xffffffff80200000"));
+        assert!(first.contains("elf.entry.physical=0x0000000000200000"));
+        assert!(first.contains("elf.translation_offset=0xffffffff80000000"));
+        assert!(!first.contains(":\\"));
+        assert!(!first.contains("/Users/"));
     }
 }

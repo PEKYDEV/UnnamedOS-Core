@@ -345,9 +345,14 @@ fn rejects_non_canonical_segment_address() {
 
 #[test]
 fn rejects_different_physical_and_virtual_addresses() {
-    let mut bytes = base_image();
-    set_program_u64(&mut bytes, 0, 24, BOOTSTRAP_LINK_ADDRESS + 0x1000);
-    assert_error(&bytes, ValidationError::PhysicalVirtualAddressMismatch);
+    let mut bytes = bootstrap_contract_image();
+    set_program_u64(&mut bytes, 1, 24, BOOTSTRAP_LINK_ADDRESS + 0x5000);
+    assert_eq!(
+        validate_bootstrap_image(&bytes).err(),
+        Some(BootstrapValidationError::Elf(
+            ValidationError::PhysicalVirtualAddressMismatch
+        ))
+    );
 }
 
 #[test]

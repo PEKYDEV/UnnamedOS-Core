@@ -16,4 +16,6 @@ Phase 1J-C allocates one UEFI `LOADER_DATA` page per planned table, writes every
 
 Phase 1J-D reads supported CPUID leaves, CR0, CR3, CR4, and EFER through a small x86-64 adapter without changing state. Pure policy validates mandatory active paging state, four-level operation, LA57 and PCID interpretation, CPU physical width, every owned frame, and the proposed root. Structured readiness and an exact CR3-stability token survive `ExitBootServices`; the owned hierarchy remains inactive.
 
+Phase 1J-E builds a second ELF from the shared kernel source using the x86-64 `kernel` code model and a separate linker script. Its PT_LOAD physical addresses begin at `0x00200000`, virtual addresses begin at `0xffffffff80200000`, and every segment has the checked offset `0xffffffff80000000`. A host-only dual-address plan separates physical copy/BSS work from higher-half virtual mappings and feeds the existing final page-table planner. The artifact is validated but not staged to the ESP or executed; BootInfo remains v1.0 and CR3 remains inherited.
+
 Normative decisions and exact layouts are recorded in [`docs/adr`](adr).

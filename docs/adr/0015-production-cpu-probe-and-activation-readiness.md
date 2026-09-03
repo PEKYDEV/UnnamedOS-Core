@@ -43,7 +43,7 @@ A külön teszt-feature a valódi snapshot elkészítése és a hierarchy materi
 
 ## Halasztott munka
 
-Higher-half ELF-layout, teljes steady-state mapping, BootInfo v2 ownership-emission, NXE/WP írás, CR3-aktiválás, transition-removal, framebuffer-renderelés és screenshot nincs ebben a csomagban.
+A higher-half ELF-layoutot és a tiszta dual-address mapping szerződést az [ADR-0016](0016-higher-half-elf-and-dual-address-contract.md) külön, runtime aktiválás nélkül valósítja meg. BootInfo v2 ownership-emission, teljes production hierarchy, NXE/WP írás, CR3-aktiválás, transition-removal, framebuffer-renderelés és screenshot továbbra sincs.
 
 ## Ellenőrzés
 
