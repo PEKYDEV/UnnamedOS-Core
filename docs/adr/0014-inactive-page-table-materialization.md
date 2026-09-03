@@ -45,7 +45,7 @@ A teszt-feature a harmadik frame-kísérlet előtt, firmware-hívás nélkül in
 
 ## Halasztott munka
 
-CPUID probing, CR0/CR3/CR4/EFER/PAT módosítás, NXE/WP engedélyezés, higher-half ELF, teljes steady-state hierarchy, BootInfo v2 emission és bármilyen CR3-váltás nincs ebben a csomagban. A futó CR3-at a kód nem olvassa és nem írja; az örökölt UEFI address space változatlan marker- és kernelhandoff-regressziója adja az inaktivitási bizonyítékot.
+Az [ADR-0015](0015-production-cpu-probe-and-activation-readiness.md) read-only módon méri a CPU-képességeket és bizonyítja a CR3 stabilitását. CR0/CR3/CR4/EFER/PAT módosítás, NXE/WP engedélyezés, higher-half ELF, teljes steady-state hierarchy, BootInfo v2 emission és bármilyen CR3-váltás továbbra sincs.
 
 ## Ellenőrzés
 

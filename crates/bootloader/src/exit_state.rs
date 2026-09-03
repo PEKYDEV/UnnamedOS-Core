@@ -5,9 +5,9 @@ use boot_protocol::{
 };
 
 use crate::{
-    BootDataAllocations, BootstrapStack, FinalMapReservedPageTables, LoadRange, LoadedKernel,
-    MAX_LOAD_ITEMS, PageBackend, PreparedBootInfo, SegmentMetadata, TransferredBootstrapStack,
-    TransferredInactivePageTables,
+    ActivationFinalMapReservedPageTables, BootDataAllocations, BootstrapStack, LoadRange,
+    LoadedKernel, MAX_LOAD_ITEMS, PageBackend, PreparedBootInfo, SegmentMetadata,
+    TransferredActivationPreparedPageTables, TransferredBootstrapStack,
 };
 use memory_layout::FrameBackend;
 
@@ -89,7 +89,7 @@ pub struct PageTableHandoffReady<
 > {
     exit: ExitReady<KB, BB>,
     stack: Option<BootstrapStack<SB>>,
-    page_tables: Option<FinalMapReservedPageTables<PB>>,
+    page_tables: Option<ActivationFinalMapReservedPageTables<PB>>,
 }
 
 impl BootServicesState {
@@ -172,7 +172,7 @@ impl<KB: PageBackend, BB: PageBackend> ExitReady<KB, BB> {
     fn cross_exit_boundary_with_resources(
         mut self,
         bootstrap_stack: Option<TransferredBootstrapStack>,
-        page_tables: Option<TransferredInactivePageTables>,
+        page_tables: Option<TransferredActivationPreparedPageTables>,
         operation: impl FnOnce(TransferredBootState) -> Infallible,
     ) -> ! {
         let kernel = ManuallyDrop::new(self.kernel.take().expect("ExitReady always owns a kernel"));
@@ -229,7 +229,7 @@ impl<KB: PageBackend, BB: PageBackend> ExitReady<KB, BB> {
     pub fn with_bootstrap_stack_and_page_tables<SB: PageBackend, PB: FrameBackend>(
         self,
         stack: BootstrapStack<SB>,
-        page_tables: FinalMapReservedPageTables<PB>,
+        page_tables: ActivationFinalMapReservedPageTables<PB>,
     ) -> Result<PageTableHandoffReady<KB, BB, SB, PB>, ExitPreparationError> {
         if stack.is_released()
             || page_tables.frame_count() == 0
@@ -297,7 +297,7 @@ pub struct TransferredBootState {
     framebuffer: FramebufferInfo,
     boot_info_address: u64,
     bootstrap_stack: Option<TransferredBootstrapStack>,
-    page_tables: Option<TransferredInactivePageTables>,
+    page_tables: Option<TransferredActivationPreparedPageTables>,
 }
 
 impl TransferredBootState {
@@ -322,7 +322,7 @@ impl TransferredBootState {
     pub const fn bootstrap_stack(&self) -> Option<TransferredBootstrapStack> {
         self.bootstrap_stack
     }
-    pub const fn page_tables(&self) -> Option<&TransferredInactivePageTables> {
+    pub const fn page_tables(&self) -> Option<&TransferredActivationPreparedPageTables> {
         self.page_tables.as_ref()
     }
 }
@@ -409,7 +409,13 @@ impl PostExitState {
     pub fn page_table_frame_count(&self) -> usize {
         self.transferred
             .page_tables()
-            .map_or(0, TransferredInactivePageTables::frame_count)
+            .map_or(0, TransferredActivationPreparedPageTables::frame_count)
+    }
+
+    pub fn activation_readiness(&self) -> Option<memory_layout::ActivationReadiness> {
+        self.transferred
+            .page_tables()
+            .map(|page_tables| page_tables.readiness())
     }
 }
 

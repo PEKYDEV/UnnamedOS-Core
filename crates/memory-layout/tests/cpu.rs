@@ -1,142 +1,248 @@
 use core::mem::{align_of, size_of};
 
-use memory_layout::{CpuCapabilities, CpuCapabilityError, SUPPORTED_PHYSICAL_END};
+use memory_layout::{
+    ActivationReadiness, CpuCapabilityError, HardeningState, PcidState, PgeState, PhysicalFrame,
+    RawCpuSnapshot, SUPPORTED_PHYSICAL_END,
+};
 
-fn supported() -> CpuCapabilities {
-    CpuCapabilities {
-        long_mode_active: 1,
-        paging_level_count: 4,
-        nx_supported: 1,
-        nxe_enabled: 0,
-        write_protect_supported: 1,
-        write_protect_enabled: 0,
-        physical_address_bits: 39,
-        linear_address_bits: 48,
-        la57_enabled: 0,
-        reserved: [0; 7],
+const MSR: u32 = 1 << 5;
+const PAE: u32 = 1 << 6;
+const NX: u32 = 1 << 20;
+const LM: u32 = 1 << 29;
+const LA57: u32 = 1 << 16;
+
+fn supported() -> RawCpuSnapshot {
+    RawCpuSnapshot {
+        maximum_basic_leaf: 7,
+        maximum_extended_leaf: 0x8000_0008,
+        basic_feature_edx: MSR | PAE,
+        structured_feature_ecx: 0,
+        extended_feature_edx: NX | LM,
+        address_width_eax: 39 | (48 << 8),
+        cr0: (1 << 31) | (1 << 16),
+        cr3: 0x1234_5000,
+        cr4: 1 << 5,
+        efer: (1 << 8) | (1 << 10) | (1 << 11),
     }
 }
 
-#[test]
-fn capability_layout_and_planning_state_are_explicit() {
-    assert_eq!(size_of::<CpuCapabilities>(), 16);
-    assert_eq!(align_of::<CpuCapabilities>(), 1);
-    assert_eq!(supported().validate_for_planning(1_u64 << 38), Ok(()));
-    assert_eq!(
-        supported().validate_for_activation(1_u64 << 38),
-        Err(CpuCapabilityError::NxeNotEnabled)
-    );
-    let mut active = supported();
-    active.nxe_enabled = 1;
-    active.write_protect_enabled = 1;
-    assert_eq!(active.validate_for_activation(1_u64 << 38), Ok(()));
-}
-
-#[test]
-fn every_required_capability_rejects_fail_closed() {
-    let cases = [
-        (
-            {
-                let mut value = supported();
-                value.long_mode_active = 0;
-                value
-            },
-            CpuCapabilityError::LongModeInactive,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.paging_level_count = 5;
-                value
-            },
-            CpuCapabilityError::UnsupportedPagingLevelCount,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.nx_supported = 0;
-                value
-            },
-            CpuCapabilityError::NxUnsupported,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.write_protect_supported = 0;
-                value
-            },
-            CpuCapabilityError::WriteProtectUnsupported,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.physical_address_bits = 31;
-                value
-            },
-            CpuCapabilityError::InvalidPhysicalAddressWidth,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.linear_address_bits = 57;
-                value
-            },
-            CpuCapabilityError::InvalidLinearAddressWidth,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.la57_enabled = 1;
-                value
-            },
-            CpuCapabilityError::La57Enabled,
-        ),
-        (
-            {
-                let mut value = supported();
-                value.reserved[0] = 1;
-                value
-            },
-            CpuCapabilityError::ReservedNotZero,
-        ),
+fn readiness(raw: RawCpuSnapshot) -> Result<ActivationReadiness, CpuCapabilityError> {
+    let frames = [
+        PhysicalFrame::new(0x20_0000).unwrap(),
+        PhysicalFrame::new(0x31_0000).unwrap(),
     ];
-    for (capabilities, expected) in cases {
-        assert_eq!(capabilities.validate_for_planning(0x1000), Err(expected));
+    raw.validate()?
+        .classify_for_hierarchy(&frames, frames[0], 0x4000_0000)
+}
+
+#[test]
+fn stable_layout_and_ready_classification_are_explicit() {
+    assert_eq!(
+        (size_of::<RawCpuSnapshot>(), align_of::<RawCpuSnapshot>()),
+        (56, 8)
+    );
+    assert_eq!(
+        (
+            size_of::<ActivationReadiness>(),
+            align_of::<ActivationReadiness>()
+        ),
+        (48, 8)
+    );
+    let result = readiness(supported()).unwrap();
+    assert_eq!(result.nxe(), HardeningState::Enabled);
+    assert_eq!(result.write_protect(), HardeningState::Enabled);
+    assert_eq!(result.pge(), PgeState::Disabled);
+    assert_eq!(result.pcid(), PcidState::Disabled);
+    assert_eq!(result.effective_linear_address_bits(), 48);
+    assert!(result.transition_permitted());
+}
+
+#[test]
+fn missing_leaf_and_feature_order_is_deterministic() {
+    let mut raw = supported();
+    raw.maximum_basic_leaf = 0;
+    raw.maximum_extended_leaf = 0;
+    raw.extended_feature_edx = 0;
+    assert_eq!(
+        raw.validate(),
+        Err(CpuCapabilityError::MissingBasicFeatureLeaf)
+    );
+    raw.maximum_basic_leaf = 1;
+    assert_eq!(
+        raw.validate(),
+        Err(CpuCapabilityError::MissingExtendedFeatureLeaf)
+    );
+    raw.maximum_extended_leaf = 0x8000_0001;
+    assert_eq!(
+        raw.validate(),
+        Err(CpuCapabilityError::MissingAddressWidthLeaf)
+    );
+    for (basic, extended, expected) in [
+        (0, LM, CpuCapabilityError::LongModeUnsupported),
+        (0, NX, CpuCapabilityError::NxUnsupported),
+        (MSR, 0, CpuCapabilityError::MsrUnsupported),
+        (PAE, 0, CpuCapabilityError::PaeUnsupported),
+    ] {
+        let mut raw = supported();
+        raw.basic_feature_edx &= !basic;
+        raw.extended_feature_edx &= !extended;
+        assert_eq!(raw.validate(), Err(expected));
     }
 }
 
 #[test]
-fn boolean_width_and_physical_range_errors_are_distinct() {
-    let mut invalid_boolean = supported();
-    invalid_boolean.nx_supported = 2;
+fn mandatory_current_state_and_contradictions_fail_closed() {
+    for (case, expected) in [
+        (1, CpuCapabilityError::PagingInactive),
+        (2, CpuCapabilityError::LongModeInactive),
+        (3, CpuCapabilityError::ContradictoryLongModeState),
+        (4, CpuCapabilityError::PaeInactive),
+        (5, CpuCapabilityError::ContradictoryLa57State),
+        (6, CpuCapabilityError::La57Enabled),
+    ] {
+        let mut raw = supported();
+        match case {
+            1 => raw.cr0 &= !(1 << 31),
+            2 => raw.efer &= !(1 << 10),
+            3 => raw.efer &= !(1 << 8),
+            4 => raw.cr4 &= !(1 << 5),
+            5 => raw.cr4 |= 1 << 12,
+            6 => {
+                raw.cr4 |= 1 << 12;
+                raw.structured_feature_ecx |= LA57;
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(raw.validate(), Err(expected));
+    }
+}
+
+#[test]
+fn la57_supported_but_disabled_retains_effective_four_level_mode() {
+    let mut raw = supported();
+    raw.structured_feature_ecx = LA57;
+    raw.address_width_eax = 46 | (57 << 8);
+    let validated = raw.validate().unwrap();
+    assert!(validated.la57_supported());
+    assert_eq!(validated.reported_linear_address_bits(), 57);
+    assert_eq!(readiness(raw).unwrap().effective_linear_address_bits(), 48);
+    raw.structured_feature_ecx = 0;
     assert_eq!(
-        invalid_boolean.validate_for_planning(0x1000),
-        Err(CpuCapabilityError::InvalidBooleanValue)
+        raw.validate(),
+        Err(CpuCapabilityError::ContradictoryLinearAddressWidth)
     );
+}
+
+#[test]
+fn physical_width_and_hierarchy_ranges_are_checked() {
+    for bits in [35_u8, 53] {
+        let mut raw = supported();
+        raw.address_width_eax = u32::from(bits) | (48 << 8);
+        assert_eq!(
+            raw.validate(),
+            Err(CpuCapabilityError::InvalidPhysicalAddressWidth)
+        );
+    }
+    for bits in [36_u8, 52] {
+        let mut raw = supported();
+        raw.address_width_eax = u32::from(bits) | (48 << 8);
+        assert!(raw.validate().is_ok());
+    }
+    let validated = supported().validate().unwrap();
+    let root = PhysicalFrame::new(0x20_0000).unwrap();
     assert_eq!(
-        supported().validate_for_planning((1_u64 << 39) + 1),
-        Err(CpuCapabilityError::RequiredPhysicalRangeUnsupported)
-    );
-    let mut wide = supported();
-    wide.physical_address_bits = 46;
-    assert_eq!(
-        wide.validate_for_planning(SUPPORTED_PHYSICAL_END + 1),
+        validated.classify_for_hierarchy(&[root], root, SUPPORTED_PHYSICAL_END + 1),
         Err(CpuCapabilityError::ArchitecturePhysicalCapExceeded)
     );
+    assert_eq!(
+        validated.classify_for_hierarchy(&[root], root, 1_u64 << 40),
+        Err(CpuCapabilityError::MappedPhysicalRangeUnsupported)
+    );
+
+    let mut narrow = supported();
+    narrow.address_width_eax = 36 | (48 << 8);
+    let narrow = narrow.validate().unwrap();
+    let high_root = PhysicalFrame::new(1_u64 << 36).unwrap();
+    assert_eq!(
+        narrow.classify_for_hierarchy(&[high_root], high_root, 0x1000),
+        Err(CpuCapabilityError::ProposedRootUnsupported)
+    );
+    assert_eq!(
+        narrow.classify_for_hierarchy(&[root, high_root], root, 0x1000),
+        Err(CpuCapabilityError::OwnedFrameUnsupported)
+    );
 }
 
 #[test]
-fn activation_requires_both_nxe_and_write_protect_state() {
-    let mut capabilities = supported();
-    capabilities.nxe_enabled = 1;
+fn cr3_pcid_and_legacy_flag_interpretations_are_separate() {
+    let mut raw = supported();
+    raw.cr3 |= (1 << 3) | (1 << 4);
+    let legacy = raw.validate().unwrap().current_cr3();
     assert_eq!(
-        capabilities.validate_for_activation(0x1000),
-        Err(CpuCapabilityError::WriteProtectNotEnabled)
+        (legacy.root_address(), legacy.context_or_flags()),
+        (0x1234_5000, 0x18)
     );
-    capabilities.write_protect_enabled = 1;
-    capabilities.nxe_enabled = 0;
+    assert_eq!(legacy.pcid_state(), PcidState::Disabled);
+    raw.cr4 |= 1 << 17;
+    raw.cr3 = 0x1234_5abc;
+    let pcid = raw.validate().unwrap().current_cr3();
     assert_eq!(
-        capabilities.validate_for_activation(0x1000),
-        Err(CpuCapabilityError::NxeNotEnabled)
+        (pcid.root_address(), pcid.context_or_flags()),
+        (0x1234_5000, 0xabc)
+    );
+    assert_eq!(pcid.pcid_state(), PcidState::EnabledMustRemainUnused);
+    raw.cr4 &= !(1 << 17);
+    assert_eq!(
+        raw.validate(),
+        Err(CpuCapabilityError::UnsupportedCr3Encoding)
+    );
+    raw.cr3 = 0;
+    assert_eq!(
+        raw.validate(),
+        Err(CpuCapabilityError::InvalidCurrentCr3Root)
+    );
+    raw.cr3 = (1_u64 << 39) | 0x1000;
+    assert_eq!(
+        raw.validate(),
+        Err(CpuCapabilityError::UnsupportedCr3Encoding)
+    );
+}
+
+#[test]
+fn every_nxe_wp_combination_and_pge_is_classified() {
+    for (nxe, wp) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut raw = supported();
+        if !nxe {
+            raw.efer &= !(1 << 11);
+        }
+        if !wp {
+            raw.cr0 &= !(1 << 16);
+        }
+        raw.cr4 |= 1 << 7;
+        let result = readiness(raw).unwrap();
+        assert_eq!(result.nxe() == HardeningState::Enabled, nxe);
+        assert_eq!(result.write_protect() == HardeningState::Enabled, wp);
+        assert_eq!(result.pge(), PgeState::Enabled);
+    }
+}
+
+#[test]
+fn proposed_root_and_cr3_stability_are_proven() {
+    let validated = supported().validate().unwrap();
+    let root = PhysicalFrame::new(0x20_0000).unwrap();
+    let other = PhysicalFrame::new(0x21_0000).unwrap();
+    assert_eq!(
+        validated.classify_for_hierarchy(&[], root, 0x1000),
+        Err(CpuCapabilityError::InvalidProposedRoot)
+    );
+    assert_eq!(
+        validated.classify_for_hierarchy(&[other, root], root, 0x1000),
+        Err(CpuCapabilityError::InvalidProposedRoot)
+    );
+    let token = validated.cr3_stability_token();
+    assert_eq!(token.verify(supported().cr3), Ok(()));
+    assert_eq!(
+        token.verify(supported().cr3 + 0x1000),
+        Err(CpuCapabilityError::InheritedCr3Changed)
     );
 }

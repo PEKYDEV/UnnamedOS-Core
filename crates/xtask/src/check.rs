@@ -159,6 +159,22 @@ pub fn run() -> Result<(), String> {
             "warnings",
         ],
     )?;
+    run_step(
+        "UEFI CPU-readiness negative loader clippy",
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "bootloader",
+            "--target",
+            "x86_64-unknown-uefi",
+            "--features",
+            "qemu-test,cpu-readiness-failure-test",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
     println!("UnnamedOS host checks passed.");
     Ok(())
 }

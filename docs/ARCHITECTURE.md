@@ -14,4 +14,6 @@ Phase 1J-B deterministically expands validated mappings into an inactive PML4/PD
 
 Phase 1J-C allocates one UEFI `LOADER_DATA` page per planned table, writes every one of the 512 entries in each owned page, and independently reads the hierarchy back against the plan. Verified frames receive exact non-usable final-map reservations and remain owned after `ExitBootServices` without any firmware-calling drop path. The QEMU reference transition requires five table frames. The hierarchy is physically constructed and reserved but inactive; production CPU probing, the complete higher-half mapping, BootInfo v2, and CR3 activation remain deferred.
 
+Phase 1J-D reads supported CPUID leaves, CR0, CR3, CR4, and EFER through a small x86-64 adapter without changing state. Pure policy validates mandatory active paging state, four-level operation, LA57 and PCID interpretation, CPU physical width, every owned frame, and the proposed root. Structured readiness and an exact CR3-stability token survive `ExitBootServices`; the owned hierarchy remains inactive.
+
 Normative decisions and exact layouts are recorded in [`docs/adr`](adr).

@@ -85,6 +85,7 @@ LA57, PCID, SMEP, SMAP, 2 MiB/1 GiB huge page, KASLR, demand paging, copy-on-wri
 - A magas kernel és a userspace külön canonical félben van, így a későbbi mikrokernel address space-ek alsó fele izolálható.
 - A direct map egyszerűsíti a frame- és lapozótábla-kezelést, de csak explicit RAM- és aliaspolicy mellett.
 - Az [ADR-0014](0014-inactive-page-table-materialization.md) megvalósítja a bounded transition hierarchy UEFI frame-allokációját, materializálását, read-back ellenőrzését és final-map rezervációját. A teljes higher-half hierarchy és CR3-váltás továbbra is külön aktiválási munka.
+- Az [ADR-0015](0015-production-cpu-probe-and-activation-readiness.md) read-only production méréssel validálja a CPU- és control-state preconditionöket, a fizikai címszélességet és az örökölt CR3 stabilitását.
 
 ## Ellenőrzés
 

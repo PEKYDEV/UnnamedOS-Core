@@ -3,6 +3,8 @@
 
 mod boot_info_loader;
 #[cfg(feature = "kernel-handoff-test")]
+mod cpu_probe;
+#[cfg(feature = "kernel-handoff-test")]
 mod handoff;
 mod kernel_loader;
 #[cfg(feature = "kernel-handoff-test")]

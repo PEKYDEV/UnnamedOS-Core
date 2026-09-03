@@ -79,7 +79,7 @@ const EXIT_BOOT_SERVICES_MARKERS: [&str; 29] = [
     "UNOS:P1H:OWNERSHIP_TRANSFERRED",
     "UNOS:P1H:PASS",
 ];
-const KERNEL_HANDOFF_MARKERS: [&str; 41] = [
+const KERNEL_HANDOFF_MARKERS: [&str; 47] = [
     "UNOS:P1C:ENTRY",
     "UNOS:P1C:UEFI_OK",
     "UNOS:P1C:PASS",
@@ -96,10 +96,14 @@ const KERNEL_HANDOFF_MARKERS: [&str; 41] = [
     "UNOS:P1F:METADATA_VALID",
     "UNOS:P1F:SOURCE_RELEASED",
     "UNOS:P1F:OWNERSHIP_PROVEN",
+    "UNOS:P1J:CPU_STATE_CAPTURED",
     "UNOS:P1J:PLAN_ACCEPTED",
     "UNOS:P1J:FRAMES_ALLOCATED",
     "UNOS:P1J:HIERARCHY_MATERIALIZED",
     "UNOS:P1J:HIERARCHY_VERIFIED",
+    "UNOS:P1J:CPU_CAPABILITIES_VALIDATED",
+    "UNOS:P1J:ACTIVATION_REQUIREMENTS_CLASSIFIED",
+    "UNOS:P1J:HIERARCHY_CPU_COMPATIBLE",
     "UNOS:P1G:GOP_READY",
     "UNOS:P1G:BUFFERS_READY",
     "UNOS:P1G:MAP_CAPTURED",
@@ -111,7 +115,9 @@ const KERNEL_HANDOFF_MARKERS: [&str; 41] = [
     "UNOS:P1H:BOOT_SERVICES_EXITED",
     "UNOS:P1H:FINAL_MAP_CONVERTED",
     "UNOS:P1J:FINAL_MAP_RESERVED",
+    "UNOS:P1J:CR3_UNCHANGED",
     "UNOS:P1H:BOOTINFO_FINAL",
+    "UNOS:P1J:ACTIVATION_PREPARED_INACTIVE",
     "UNOS:P1H:OWNERSHIP_TRANSFERRED",
     "UNOS:P1J:OWNERSHIP_TRANSFERRED",
     "UNOS:P1H:PASS",
@@ -122,7 +128,7 @@ const KERNEL_HANDOFF_MARKERS: [&str; 41] = [
     "UNOS:P1I:MEMORY_MAP_OK",
     "UNOS:P1I:PASS",
 ];
-const PAGE_TABLE_ALLOCATION_FAILURE_MARKERS: [&str; 19] = [
+const CPU_READINESS_FAILURE_MARKERS: [&str; 23] = [
     "UNOS:P1C:ENTRY",
     "UNOS:P1C:UEFI_OK",
     "UNOS:P1C:PASS",
@@ -139,6 +145,32 @@ const PAGE_TABLE_ALLOCATION_FAILURE_MARKERS: [&str; 19] = [
     "UNOS:P1F:METADATA_VALID",
     "UNOS:P1F:SOURCE_RELEASED",
     "UNOS:P1F:OWNERSHIP_PROVEN",
+    "UNOS:P1J:CPU_STATE_CAPTURED",
+    "UNOS:P1J:PLAN_ACCEPTED",
+    "UNOS:P1J:FRAMES_ALLOCATED",
+    "UNOS:P1J:HIERARCHY_MATERIALIZED",
+    "UNOS:P1J:HIERARCHY_VERIFIED",
+    "UNOS:P1J:CPU_ROLLBACK_COMPLETE",
+    "UNOS:P1J:FAIL:CPU_POLICY",
+];
+const PAGE_TABLE_ALLOCATION_FAILURE_MARKERS: [&str; 20] = [
+    "UNOS:P1C:ENTRY",
+    "UNOS:P1C:UEFI_OK",
+    "UNOS:P1C:PASS",
+    "UNOS:P1D:KERNEL_OPEN",
+    "UNOS:P1D:KERNEL_READ",
+    "UNOS:P1D:KERNEL_VALID",
+    "UNOS:P1D:PASS",
+    "UNOS:P1E:PLAN_VALID",
+    "UNOS:P1E:SEGMENTS_ALLOCATED",
+    "UNOS:P1E:SEGMENTS_ZEROED",
+    "UNOS:P1E:SEGMENTS_COPIED",
+    "UNOS:P1E:LOAD_VERIFIED",
+    "UNOS:P1F:OWNERSHIP_READY",
+    "UNOS:P1F:METADATA_VALID",
+    "UNOS:P1F:SOURCE_RELEASED",
+    "UNOS:P1F:OWNERSHIP_PROVEN",
+    "UNOS:P1J:CPU_STATE_CAPTURED",
     "UNOS:P1J:PLAN_ACCEPTED",
     "UNOS:P1J:ROLLBACK_COMPLETE",
     "UNOS:P1J:FAIL:ALLOC",
@@ -364,6 +396,50 @@ pub fn test_page_tables() -> Result<(), String> {
     Ok(())
 }
 
+pub fn test_cpu_readiness() -> Result<(), String> {
+    let kernel_path = kernel::build_kernel_for_uefi_test()?;
+    let build = build_and_stage(BuildMode::CpuReadinessFailure)?;
+    let environment = doctor::resolve_phase1_paths()?;
+    let test_root = build.output_root.join("test-cpu-readiness");
+    remove_directory_if_present(&test_root)?;
+    let fixture = prepare_fixture(&test_root, Scenario::Valid, &build.esp_boot, &kernel_path)?;
+    let run = prepare_run(&fixture.root, &environment.ovmf_vars_template)?;
+    let config = QemuConfig {
+        ovmf_code: &environment.ovmf_code,
+        ovmf_vars: &run.vars_copy,
+        esp: &fixture.esp,
+        serial_log: Some(&run.serial_log),
+        qemu_test: true,
+    };
+    let child = Command::new(&environment.qemu)
+        .args(qemu_arguments(&config))
+        .current_dir(repository_root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("QEMU startup failure: {error}"))?;
+    let mut child = ProcessChild(child);
+    let outcome = wait_for_child(&mut child, HEADLESS_TIMEOUT)?;
+    verify_vars_source_unchanged(&run)?;
+    let serial = fs::read_to_string(&run.serial_log)
+        .map_err(|error| format!("CPU-readiness serial log is unavailable: {error}"))?;
+    if let Some(error) = startup_failure(outcome, &serial) {
+        return Err(error);
+    }
+    classify_test_result(
+        outcome,
+        QEMU_FAILURE_EXIT_CODE,
+        validate_markers(&serial, &CPU_READINESS_FAILURE_MARKERS),
+    )?;
+    println!(
+        "scenario.cpu-readiness-failure=passed; markers={}; exit={QEMU_FAILURE_EXIT_CODE}",
+        CPU_READINESS_FAILURE_MARKERS.join(" -> ")
+    );
+    println!("Timeout: {} seconds", HEADLESS_TIMEOUT.as_secs());
+    Ok(())
+}
+
 fn execute_scenario(
     scenario: Scenario,
     fixture: &Fixture,
@@ -566,6 +642,7 @@ enum BuildMode {
     ExitBootServices,
     KernelHandoff,
     PageTableAllocationFailure,
+    CpuReadinessFailure,
 }
 
 struct BuildPaths {
@@ -602,6 +679,9 @@ fn build_and_stage(mode: BuildMode) -> Result<BuildPaths, String> {
         }
         BuildMode::PageTableAllocationFailure => {
             command.args(["--features", "qemu-test,page-table-allocation-failure-test"]);
+        }
+        BuildMode::CpuReadinessFailure => {
+            command.args(["--features", "qemu-test,cpu-readiness-failure-test"]);
         }
     }
     let status = command
@@ -1208,6 +1288,22 @@ mod tests {
             validate_markers(&negative_serial, &PAGE_TABLE_ALLOCATION_FAILURE_MARKERS),
             Ok(())
         );
+        let cpu_negative_serial = CPU_READINESS_FAILURE_MARKERS
+            .iter()
+            .map(|marker| format!("{marker}\r\n"))
+            .collect::<String>();
+        assert_eq!(
+            validate_markers(&cpu_negative_serial, &CPU_READINESS_FAILURE_MARKERS),
+            Ok(())
+        );
+        assert!(CPU_READINESS_FAILURE_MARKERS.iter().all(|marker| !matches!(
+            *marker,
+            "UNOS:P1J:CPU_CAPABILITIES_VALIDATED"
+                | "UNOS:P1J:ACTIVATION_REQUIREMENTS_CLASSIFIED"
+                | "UNOS:P1J:HIERARCHY_CPU_COMPATIBLE"
+                | "UNOS:P1H:EXIT_READY"
+                | "UNOS:P1I:HANDOFF_READY"
+        )));
         assert!(
             PAGE_TABLE_ALLOCATION_FAILURE_MARKERS
                 .iter()

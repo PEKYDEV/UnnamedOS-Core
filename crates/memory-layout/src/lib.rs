@@ -11,7 +11,10 @@ mod cpu;
 mod frame_owner;
 mod page_table;
 
-pub use cpu::{CpuCapabilities, CpuCapabilityError};
+pub use cpu::{
+    ActivationReadiness, CpuCapabilityError, Cr3StabilityToken, Cr3State, HardeningState,
+    PcidState, PgeState, RawCpuSnapshot, ValidatedCpuSnapshot,
+};
 pub use frame_owner::{
     FrameBackend, FrameOwnerBuildError, FrameOwnerCause, FrameOwnerError, PageTableFrameOwner,
     TransferredPageTableFrames,

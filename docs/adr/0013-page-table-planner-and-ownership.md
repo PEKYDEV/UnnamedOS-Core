@@ -69,7 +69,7 @@ A tiszta `CpuCapabilities` adatmodell külön kezeli a tervezési és aktiválá
 
 ## Halasztott munka
 
-Az [ADR-0014](0014-inactive-page-table-materialization.md) megvalósítja az elfogadott bounded transition terv UEFI-backed allokációját, fizikai írását, független read-back ellenőrzését és final-map rezervációját. CPUID/CR0/CR4/EFER probing, NXE/WP engedélyezés, teljes higher-half hierarchy, CR3-váltás és transition-removal végrehajtás továbbra is halasztott.
+Az [ADR-0014](0014-inactive-page-table-materialization.md) megvalósítja az elfogadott bounded transition terv UEFI-backed allokációját, fizikai írását, független read-back ellenőrzését és final-map rezervációját. Az [ADR-0015](0015-production-cpu-probe-and-activation-readiness.md) hozzáadja a read-only production CPU-probe-ot és readiness-osztályozást. NXE/WP módosítás, teljes higher-half hierarchy, CR3-váltás és transition-removal továbbra is halasztott.
 
 ## Ellenőrzés
 

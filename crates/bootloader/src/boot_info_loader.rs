@@ -76,6 +76,10 @@ pub enum BootInfoLoadError {
     BootInfo,
     #[cfg(feature = "kernel-handoff-test")]
     PageTable(PageTableLoadError),
+    #[cfg(feature = "kernel-handoff-test")]
+    CpuPolicy,
+    #[cfg(feature = "kernel-handoff-test")]
+    Cr3Stability,
     #[cfg(not(feature = "exit-boot-services-test"))]
     Free,
 }
@@ -92,6 +96,10 @@ impl BootInfoLoadError {
             Self::BootInfo => b"UNOS:P1G:FAIL:BOOTINFO",
             #[cfg(feature = "kernel-handoff-test")]
             Self::PageTable(error) => error.marker(),
+            #[cfg(feature = "kernel-handoff-test")]
+            Self::CpuPolicy => b"UNOS:P1J:FAIL:CPU_POLICY",
+            #[cfg(feature = "kernel-handoff-test")]
+            Self::Cr3Stability => b"UNOS:P1J:FAIL:CR3_STABILITY",
             #[cfg(not(feature = "exit-boot-services-test"))]
             Self::Free => b"UNOS:P1G:FAIL:FREE",
         }
@@ -286,14 +294,74 @@ fn prepare<B: PageBackend>(
 
 #[cfg(feature = "exit-boot-services-test")]
 pub fn prepare_and_exit<B: PageBackend>(
-    loaded: LoadedKernel<B>,
+    #[cfg_attr(not(feature = "cpu-readiness-failure-test"), allow(unused_mut))]
+    mut loaded: LoadedKernel<B>,
     serial: &mut SerialPort,
 ) -> Result<Infallible, BootInfoLoadError> {
     #[cfg(feature = "kernel-handoff-test")]
-    let stack = allocate_bootstrap_stack(&loaded)?;
+    #[cfg_attr(not(feature = "cpu-readiness-failure-test"), allow(unused_mut))]
+    let mut stack = allocate_bootstrap_stack(&loaded)?;
     #[cfg(feature = "kernel-handoff-test")]
-    let verified_page_tables = page_table_loader::construct_inactive(&loaded, &stack, serial)
+    let observed_cpu = crate::cpu_probe::capture();
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(crate::cpu_probe::STATE_CAPTURED_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    #[cfg_attr(not(feature = "cpu-readiness-failure-test"), allow(unused_mut))]
+    let mut verified_page_tables = page_table_loader::construct_inactive(&loaded, &stack, serial)
         .map_err(BootInfoLoadError::PageTable)?;
+    #[cfg(feature = "kernel-handoff-test")]
+    let policy_cpu = observed_cpu;
+    #[cfg(feature = "cpu-readiness-failure-test")]
+    let policy_cpu = {
+        let mut policy_cpu = policy_cpu;
+        policy_cpu.extended_feature_edx &= !(1 << 20);
+        policy_cpu
+    };
+    #[cfg(feature = "kernel-handoff-test")]
+    let validated_cpu = match policy_cpu.validate() {
+        Ok(value) => value,
+        Err(_) => {
+            #[cfg(feature = "cpu-readiness-failure-test")]
+            {
+                let page_tables_released = verified_page_tables.try_release().is_ok()
+                    && verified_page_tables.frame_count() == 0;
+                let stack_released = stack.try_release().is_ok() && stack.is_released();
+                let kernel_released = loaded.try_release().is_ok() && loaded.is_released();
+                if page_tables_released && stack_released && kernel_released {
+                    serial.write_line(crate::cpu_probe::ROLLBACK_MARKER);
+                }
+            }
+            return Err(BootInfoLoadError::CpuPolicy);
+        }
+    };
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(crate::cpu_probe::CAPABILITIES_VALIDATED_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    let mapped_end = (loaded.entry_point() & !(bootloader::UEFI_PAGE_SIZE - 1))
+        .checked_add(bootloader::UEFI_PAGE_SIZE)
+        .ok_or(BootInfoLoadError::CpuPolicy)?
+        .max(stack.top());
+    #[cfg(feature = "kernel-handoff-test")]
+    let readiness = validated_cpu
+        .classify_for_hierarchy(
+            verified_page_tables.frames(),
+            verified_page_tables.root_frame(),
+            mapped_end,
+        )
+        .map_err(|_| BootInfoLoadError::CpuPolicy)?;
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(crate::cpu_probe::REQUIREMENTS_CLASSIFIED_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    readiness
+        .cr3_stability_token()
+        .verify(crate::cpu_probe::read_cr3())
+        .map_err(|_| BootInfoLoadError::Cr3Stability)?;
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(crate::cpu_probe::HIERARCHY_COMPATIBLE_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    let activation_prepared = verified_page_tables
+        .prepare_activation(readiness)
+        .map_err(|_| BootInfoLoadError::CpuPolicy)?;
     #[cfg(not(feature = "kernel-handoff-test"))]
     let (prepared, _) = prepare(&loaded, serial, None, &[])?;
     #[cfg(feature = "kernel-handoff-test")]
@@ -301,12 +369,18 @@ pub fn prepare_and_exit<B: PageBackend>(
         &loaded,
         serial,
         Some(stack.allocation()),
-        verified_page_tables.frames(),
+        activation_prepared.frames(),
     )?;
     #[cfg(feature = "kernel-handoff-test")]
-    let page_tables = verified_page_tables
+    let page_tables = activation_prepared
         .confirm_final_map_reservation(reservation_proof.ok_or(BootInfoLoadError::Reservation)?)
         .map_err(|_| BootInfoLoadError::PageTable(PageTableLoadError::Reserve))?;
+    #[cfg(feature = "kernel-handoff-test")]
+    page_tables
+        .readiness()
+        .cr3_stability_token()
+        .verify(crate::cpu_probe::read_cr3())
+        .map_err(|_| BootInfoLoadError::Cr3Stability)?;
     let ready = BootServicesState::new()
         .with_kernel(loaded)
         .and_then(|state| state.with_boot_information(prepared))
@@ -508,6 +582,21 @@ fn finalize_post_exit(
         Err(_) => post_exit_failure(serial, b"UNOS:P1H:FAIL:BOOTINFO"),
     };
     #[cfg(feature = "kernel-handoff-test")]
+    let activation_readiness = match post_exit.activation_readiness() {
+        Some(value) => value,
+        None => post_exit_failure(serial, b"UNOS:P1J:FAIL:CPU_POLICY"),
+    };
+    #[cfg(feature = "kernel-handoff-test")]
+    if activation_readiness
+        .cr3_stability_token()
+        .verify(crate::cpu_probe::read_cr3())
+        .is_err()
+    {
+        post_exit_failure(serial, b"UNOS:P1J:FAIL:CR3_STABILITY");
+    }
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(crate::cpu_probe::CR3_UNCHANGED_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
     let page_table_state_valid = post_exit.page_table_root_frame() == Some(page_table_root)
         && post_exit.page_table_frame_count() == page_table_count;
     #[cfg(not(feature = "kernel-handoff-test"))]
@@ -520,6 +609,8 @@ fn finalize_post_exit(
         post_exit_failure(serial, b"UNOS:P1H:FAIL:BOOTINFO");
     }
     serial.write_line(BOOTINFO_FINAL_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(crate::cpu_probe::ACTIVATION_PREPARED_MARKER);
     serial.write_line(OWNERSHIP_TRANSFERRED_MARKER);
     #[cfg(feature = "kernel-handoff-test")]
     serial.write_line(page_table_loader::OWNERSHIP_TRANSFERRED_MARKER);

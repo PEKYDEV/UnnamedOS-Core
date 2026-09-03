@@ -2,10 +2,11 @@
 
 use boot_protocol::{MEMORY_KIND_PAGE_TABLE, MEMORY_PAGE_SIZE, MemoryDescriptor};
 use memory_layout::{
-    BOOTSTRAP_STACK_BYTES, CachePolicy, ConstructionPlan, EntryFlags, EntryTargetKind,
-    FrameBackend, FrameOwnerBuildError, FrameSlot, MappingKind, MappingPermissions, MappingPlan,
-    PAGE_SIZE, PageTableFrameOwner, PageTablePlanError, PhysicalFrame, PhysicalRange, PlanMode,
-    PlannedEntry, TableIndex, TableLevel, TransferredPageTableFrames, VirtualRange,
+    ActivationReadiness, BOOTSTRAP_STACK_BYTES, CachePolicy, ConstructionPlan, Cr3StabilityToken,
+    EntryFlags, EntryTargetKind, FrameBackend, FrameOwnerBuildError, FrameOwnerError, FrameSlot,
+    MappingKind, MappingPermissions, MappingPlan, PAGE_SIZE, PageTableFrameOwner,
+    PageTablePlanError, PhysicalFrame, PhysicalRange, PlanMode, PlannedEntry, TableIndex,
+    TableLevel, TransferredPageTableFrames, VirtualRange,
 };
 
 use crate::{MapBuildError, Reservation, ReservationList, ReservationSource};
@@ -132,9 +133,25 @@ pub struct FinalMapReservedPageTables<B: FrameBackend> {
     owner: PageTableFrameOwner<B, PAGE_TABLE_FRAME_CAPACITY>,
 }
 
+pub struct ActivationPreparedPageTables<B: FrameBackend> {
+    hierarchy: VerifiedInactivePageTables<B>,
+    readiness: ActivationReadiness,
+}
+
+pub struct ActivationFinalMapReservedPageTables<B: FrameBackend> {
+    hierarchy: FinalMapReservedPageTables<B>,
+    readiness: ActivationReadiness,
+}
+
 #[must_use]
 pub struct TransferredInactivePageTables {
     frames: TransferredPageTableFrames<PAGE_TABLE_FRAME_CAPACITY>,
+}
+
+#[must_use]
+pub struct TransferredActivationPreparedPageTables {
+    hierarchy: TransferredInactivePageTables,
+    readiness: ActivationReadiness,
 }
 
 impl PlannedPageTables {
@@ -254,6 +271,27 @@ impl<B: FrameBackend> VerifiedInactivePageTables<B> {
         append_page_table_reservations(self.owner.frames(), reservations)
     }
 
+    pub fn try_release(&mut self) -> Result<(), FrameOwnerError<B::Error>> {
+        self.owner.try_release()
+    }
+
+    pub fn prepare_activation(
+        self,
+        readiness: ActivationReadiness,
+    ) -> Result<ActivationPreparedPageTables<B>, PageTableReservationError> {
+        if !readiness.transition_permitted()
+            || readiness.proposed_root() != self.root_frame().address()
+        {
+            return Err(PageTableReservationError::IncompleteCoverage {
+                frame_slot: FrameSlot::ROOT,
+            });
+        }
+        Ok(ActivationPreparedPageTables {
+            hierarchy: self,
+            readiness,
+        })
+    }
+
     pub fn confirm_final_map_reservation(
         self,
         proof: PageTableReservationProof,
@@ -270,6 +308,51 @@ impl<B: FrameBackend> VerifiedInactivePageTables<B> {
             planned_table_count: self.planned_table_count,
             owner: self.owner,
         })
+    }
+}
+
+impl<B: FrameBackend> ActivationPreparedPageTables<B> {
+    pub fn frames(&self) -> &[PhysicalFrame] {
+        self.hierarchy.frames()
+    }
+
+    pub const fn root_frame(&self) -> PhysicalFrame {
+        self.hierarchy.root_frame()
+    }
+
+    pub const fn readiness(&self) -> ActivationReadiness {
+        self.readiness
+    }
+
+    pub fn confirm_final_map_reservation(
+        self,
+        proof: PageTableReservationProof,
+    ) -> Result<ActivationFinalMapReservedPageTables<B>, PageTableReservationError> {
+        Ok(ActivationFinalMapReservedPageTables {
+            hierarchy: self.hierarchy.confirm_final_map_reservation(proof)?,
+            readiness: self.readiness,
+        })
+    }
+}
+
+impl<B: FrameBackend> ActivationFinalMapReservedPageTables<B> {
+    pub const fn frame_count(&self) -> usize {
+        self.hierarchy.frame_count()
+    }
+
+    pub const fn planned_table_count(&self) -> usize {
+        self.hierarchy.planned_table_count()
+    }
+
+    pub const fn readiness(&self) -> ActivationReadiness {
+        self.readiness
+    }
+
+    pub fn transfer(self) -> TransferredActivationPreparedPageTables {
+        TransferredActivationPreparedPageTables {
+            hierarchy: self.hierarchy.transfer(),
+            readiness: self.readiness,
+        }
     }
 }
 
@@ -308,6 +391,28 @@ impl TransferredInactivePageTables {
 
     pub fn frames(&self) -> &[PhysicalFrame] {
         self.frames.frames()
+    }
+}
+
+impl TransferredActivationPreparedPageTables {
+    pub const fn frame_count(&self) -> usize {
+        self.hierarchy.frame_count()
+    }
+
+    pub const fn root_frame(&self) -> PhysicalFrame {
+        self.hierarchy.root_frame()
+    }
+
+    pub fn frames(&self) -> &[PhysicalFrame] {
+        self.hierarchy.frames()
+    }
+
+    pub const fn readiness(&self) -> ActivationReadiness {
+        self.readiness
+    }
+
+    pub const fn cr3_stability_token(&self) -> Cr3StabilityToken {
+        self.readiness.cr3_stability_token()
     }
 }
 
@@ -1082,6 +1187,58 @@ mod tests {
         let transferred = reserved.transfer();
         assert_eq!(transferred.root_frame(), root);
         assert_eq!(transferred.frame_count(), count);
+        drop(transferred);
+        assert!(state.borrow().freed.is_empty());
+    }
+
+    #[test]
+    fn only_cpu_compatible_hierarchy_reaches_activation_prepared_transfer() {
+        let (allocated, mut memory, state) = setup();
+        let verified = allocated
+            .materialize(&mut memory)
+            .unwrap()
+            .verify(&memory)
+            .unwrap();
+        let raw = memory_layout::RawCpuSnapshot {
+            maximum_basic_leaf: 7,
+            maximum_extended_leaf: 0x8000_0008,
+            basic_feature_edx: (1 << 5) | (1 << 6),
+            structured_feature_ecx: 0,
+            extended_feature_edx: (1 << 20) | (1 << 29),
+            address_width_eax: 39 | (48 << 8),
+            cr0: (1 << 31) | (1 << 16),
+            cr3: 0x1234_5000,
+            cr4: 1 << 5,
+            efer: (1 << 8) | (1 << 10) | (1 << 11),
+        };
+        let readiness = raw
+            .validate()
+            .unwrap()
+            .classify_for_hierarchy(verified.frames(), verified.root_frame(), 0x410000)
+            .unwrap();
+        let prepared = verified.prepare_activation(readiness).unwrap();
+        let mut reservations = ReservationList::new();
+        append_page_table_reservations(prepared.frames(), &mut reservations).unwrap();
+        reservations.finish().unwrap();
+        let base = [MemoryDescriptor {
+            kind: MEMORY_KIND_USABLE,
+            reserved0: 0,
+            physical_start: 0x100000,
+            page_count: 0x140,
+            attributes: 0,
+        }];
+        let mut output = [base[0]; 16];
+        let count = apply_reservations(&base, &reservations, &mut output).unwrap();
+        let proof = verify_page_table_reservations(prepared.frames(), &output[..count]).unwrap();
+        let transferred = prepared
+            .confirm_final_map_reservation(proof)
+            .unwrap()
+            .transfer();
+        assert_eq!(transferred.readiness(), readiness);
+        assert_eq!(
+            transferred.root_frame().address(),
+            readiness.proposed_root()
+        );
         drop(transferred);
         assert!(state.borrow().freed.is_empty());
     }
