@@ -143,6 +143,22 @@ pub fn run() -> Result<(), String> {
             "warnings",
         ],
     )?;
+    run_step(
+        "UEFI page-table negative loader clippy",
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "bootloader",
+            "--target",
+            "x86_64-unknown-uefi",
+            "--features",
+            "qemu-test,page-table-allocation-failure-test",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
     println!("UnnamedOS host checks passed.");
     Ok(())
 }

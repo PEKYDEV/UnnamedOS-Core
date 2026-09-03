@@ -5,6 +5,8 @@ mod boot_info_loader;
 #[cfg(feature = "kernel-handoff-test")]
 mod handoff;
 mod kernel_loader;
+#[cfg(feature = "kernel-handoff-test")]
+mod page_table_loader;
 mod segment_loader;
 mod serial;
 

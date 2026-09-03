@@ -13,10 +13,12 @@ default = []
 qemu-test = []
 exit-boot-services-test = []
 kernel-handoff-test = ["exit-boot-services-test"]
+page-table-allocation-failure-test = ["kernel-handoff-test"]
 
 [dependencies]
 boot-protocol = { path = "../boot-protocol" }
 kernel-image = { path = "../kernel-image" }
+memory-layout = { path = "../memory-layout" }
 uefi = { version = "=0.39.0", default-features = false }
 
 [[bin]]

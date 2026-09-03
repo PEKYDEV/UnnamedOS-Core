@@ -317,6 +317,10 @@ fn transitional_aliases_have_one_exact_root_removal() {
 #[test]
 fn physical_frames_and_entry_bits_fail_closed() {
     assert_eq!(
+        PhysicalFrame::new(0),
+        Err(PageTablePlanError::ZeroPhysicalFrame)
+    );
+    assert_eq!(
         PhysicalFrame::new(1),
         Err(PageTablePlanError::UnalignedPhysicalFrame)
     );

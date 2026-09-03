@@ -5,9 +5,11 @@ use boot_protocol::{
 };
 
 use crate::{
-    BootDataAllocations, BootstrapStack, LoadRange, LoadedKernel, MAX_LOAD_ITEMS, PageBackend,
-    PreparedBootInfo, SegmentMetadata, TransferredBootstrapStack,
+    BootDataAllocations, BootstrapStack, FinalMapReservedPageTables, LoadRange, LoadedKernel,
+    MAX_LOAD_ITEMS, PageBackend, PreparedBootInfo, SegmentMetadata, TransferredBootstrapStack,
+    TransferredInactivePageTables,
 };
+use memory_layout::FrameBackend;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExitPreparationError {
@@ -74,6 +76,20 @@ pub struct ExitReady<KB: PageBackend, BB: PageBackend> {
 pub struct HandoffReady<KB: PageBackend, BB: PageBackend, SB: PageBackend> {
     exit: ExitReady<KB, BB>,
     stack: Option<BootstrapStack<SB>>,
+}
+
+/// Complete pre-exit state including a verified, final-map-reserved inactive
+/// page-table hierarchy. Every owner remains armed until the atomic boundary.
+#[must_use]
+pub struct PageTableHandoffReady<
+    KB: PageBackend,
+    BB: PageBackend,
+    SB: PageBackend,
+    PB: FrameBackend,
+> {
+    exit: ExitReady<KB, BB>,
+    stack: Option<BootstrapStack<SB>>,
+    page_tables: Option<FinalMapReservedPageTables<PB>>,
 }
 
 impl BootServicesState {
@@ -150,12 +166,13 @@ impl<KB: PageBackend, BB: PageBackend> ExitReady<KB, BB> {
         self,
         operation: impl FnOnce(TransferredBootState) -> Infallible,
     ) -> ! {
-        self.cross_exit_boundary_with_stack(None, operation)
+        self.cross_exit_boundary_with_resources(None, None, operation)
     }
 
-    fn cross_exit_boundary_with_stack(
+    fn cross_exit_boundary_with_resources(
         mut self,
         bootstrap_stack: Option<TransferredBootstrapStack>,
+        page_tables: Option<TransferredInactivePageTables>,
         operation: impl FnOnce(TransferredBootState) -> Infallible,
     ) -> ! {
         let kernel = ManuallyDrop::new(self.kernel.take().expect("ExitReady always owns a kernel"));
@@ -178,6 +195,7 @@ impl<KB: PageBackend, BB: PageBackend> ExitReady<KB, BB> {
             framebuffer: boot_info.framebuffer(),
             boot_info_address: boot_info.boot_info_physical_address(),
             bootstrap_stack,
+            page_tables,
         };
         match operation(state) {}
     }
@@ -203,7 +221,53 @@ impl<KB: PageBackend, BB: PageBackend, SB: PageBackend> HandoffReady<KB, BB, SB>
             .expect("HandoffReady owns stack")
             .transfer();
         self.exit
-            .cross_exit_boundary_with_stack(Some(stack), operation)
+            .cross_exit_boundary_with_resources(Some(stack), None, operation)
+    }
+}
+
+impl<KB: PageBackend, BB: PageBackend> ExitReady<KB, BB> {
+    pub fn with_bootstrap_stack_and_page_tables<SB: PageBackend, PB: FrameBackend>(
+        self,
+        stack: BootstrapStack<SB>,
+        page_tables: FinalMapReservedPageTables<PB>,
+    ) -> Result<PageTableHandoffReady<KB, BB, SB, PB>, ExitPreparationError> {
+        if stack.is_released()
+            || page_tables.frame_count() == 0
+            || page_tables.frame_count() != page_tables.planned_table_count()
+        {
+            return Err(ExitPreparationError::BootInformationReleased);
+        }
+        Ok(PageTableHandoffReady {
+            exit: self,
+            stack: Some(stack),
+            page_tables: Some(page_tables),
+        })
+    }
+}
+
+impl<KB: PageBackend, BB: PageBackend, SB: PageBackend, PB: FrameBackend>
+    PageTableHandoffReady<KB, BB, SB, PB>
+{
+    pub fn boot_allocations(&self) -> BootDataAllocations {
+        self.exit.boot_allocations()
+    }
+
+    pub fn cross_exit_boundary(
+        mut self,
+        operation: impl FnOnce(TransferredBootState) -> Infallible,
+    ) -> ! {
+        let stack = self
+            .stack
+            .take()
+            .expect("PageTableHandoffReady owns a stack")
+            .transfer();
+        let page_tables = self
+            .page_tables
+            .take()
+            .expect("PageTableHandoffReady owns page tables")
+            .transfer();
+        self.exit
+            .cross_exit_boundary_with_resources(Some(stack), Some(page_tables), operation)
     }
 }
 
@@ -233,6 +297,7 @@ pub struct TransferredBootState {
     framebuffer: FramebufferInfo,
     boot_info_address: u64,
     bootstrap_stack: Option<TransferredBootstrapStack>,
+    page_tables: Option<TransferredInactivePageTables>,
 }
 
 impl TransferredBootState {
@@ -257,6 +322,9 @@ impl TransferredBootState {
     pub const fn bootstrap_stack(&self) -> Option<TransferredBootstrapStack> {
         self.bootstrap_stack
     }
+    pub const fn page_tables(&self) -> Option<&TransferredInactivePageTables> {
+        self.page_tables.as_ref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -272,6 +340,7 @@ pub enum PostExitError {
     InvalidBootInformation,
     InvalidDescriptors,
     WrongBootInformationAddress,
+    InvalidPageTableReservation,
 }
 
 /// Fully validated post-UEFI state. It owns no Rust value whose destructor can
@@ -308,6 +377,11 @@ impl PostExitState {
         {
             return Err(PostExitError::WrongBootInformationAddress);
         }
+        if let Some(page_tables) = transferred.page_tables()
+            && crate::verify_page_table_reservations(page_tables.frames(), descriptors).is_err()
+        {
+            return Err(PostExitError::InvalidPageTableReservation);
+        }
         Ok(Self {
             transferred,
             boot_info,
@@ -326,6 +400,16 @@ impl PostExitState {
     }
     pub const fn final_map_metadata(&self) -> FinalMapMetadata {
         self.final_map
+    }
+    pub fn page_table_root_frame(&self) -> Option<u64> {
+        self.transferred
+            .page_tables()
+            .map(|page_tables| page_tables.root_frame().address())
+    }
+    pub fn page_table_frame_count(&self) -> usize {
+        self.transferred
+            .page_tables()
+            .map_or(0, TransferredInactivePageTables::frame_count)
     }
 }
 
@@ -608,6 +692,7 @@ mod tests {
             framebuffer,
             boot_info_address: allocations.boot_info.page_start,
             bootstrap_stack: None,
+            page_tables: None,
         };
         let boot_info = build_boot_info(
             allocations.converted_map.page_start,

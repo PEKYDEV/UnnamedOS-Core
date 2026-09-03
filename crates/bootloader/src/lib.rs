@@ -7,11 +7,13 @@ mod boot_info;
 mod bootstrap_stack;
 mod exit_state;
 mod load_plan;
+mod page_tables;
 
 pub use boot_info::*;
 pub use bootstrap_stack::*;
 pub use exit_state::*;
 pub use load_plan::*;
+pub use page_tables::*;
 
 pub const KERNEL_PATH: &str = r"\EFI\UNNAMEDOS\KERNEL.ELF";
 pub const MAX_KERNEL_BYTES: u64 = 16 * 1024 * 1024;

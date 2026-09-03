@@ -89,6 +89,9 @@ impl PhysicalFrame {
     pub(crate) const EMPTY: Self = Self(0);
 
     pub fn new(address: u64) -> Result<Self, PageTablePlanError> {
+        if address == 0 {
+            return Err(PageTablePlanError::ZeroPhysicalFrame);
+        }
         PhysicalAddress::new(address).map_err(PageTablePlanError::Layout)?;
         if !address.is_multiple_of(PAGE_SIZE) {
             return Err(PageTablePlanError::UnalignedPhysicalFrame);
@@ -355,6 +358,7 @@ pub enum PageTablePlanError {
     Layout(LayoutError),
     InvalidTableIndex,
     UnalignedPhysicalFrame,
+    ZeroPhysicalFrame,
     InvalidEntryFlags,
     UserMappingForbidden,
     WritableExecutableLeaf,

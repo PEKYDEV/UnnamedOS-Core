@@ -197,6 +197,7 @@ pub enum ReservationSource {
     ConvertedMemoryMap,
     Framebuffer,
     BootstrapStack,
+    PageTable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

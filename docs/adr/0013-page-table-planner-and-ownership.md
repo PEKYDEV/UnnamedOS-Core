@@ -69,7 +69,7 @@ A tiszta `CpuCapabilities` adatmodell külön kezeli a tervezési és aktiválá
 
 ## Halasztott munka
 
-UEFI-backed production frame-allokáció, final-map overlay létrehozása, table-frame-ek fizikai írása, CPUID/CR0/CR4/EFER probing, NXE/WP engedélyezés, CR3-váltás, higher-half ELF és transition-removal végrehajtás későbbi fázis. A Phase 1J-B sem az ELF-et, sem a 128 byte-os BootInfo emittert, sem a kernel entryt vagy QEMU markereket nem módosítja.
+Az [ADR-0014](0014-inactive-page-table-materialization.md) megvalósítja az elfogadott bounded transition terv UEFI-backed allokációját, fizikai írását, független read-back ellenőrzését és final-map rezervációját. CPUID/CR0/CR4/EFER probing, NXE/WP engedélyezés, teljes higher-half hierarchy, CR3-váltás és transition-removal végrehajtás továbbra is halasztott.
 
 ## Ellenőrzés
 

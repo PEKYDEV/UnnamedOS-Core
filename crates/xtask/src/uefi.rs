@@ -79,7 +79,7 @@ const EXIT_BOOT_SERVICES_MARKERS: [&str; 29] = [
     "UNOS:P1H:OWNERSHIP_TRANSFERRED",
     "UNOS:P1H:PASS",
 ];
-const KERNEL_HANDOFF_MARKERS: [&str; 35] = [
+const KERNEL_HANDOFF_MARKERS: [&str; 41] = [
     "UNOS:P1C:ENTRY",
     "UNOS:P1C:UEFI_OK",
     "UNOS:P1C:PASS",
@@ -96,6 +96,10 @@ const KERNEL_HANDOFF_MARKERS: [&str; 35] = [
     "UNOS:P1F:METADATA_VALID",
     "UNOS:P1F:SOURCE_RELEASED",
     "UNOS:P1F:OWNERSHIP_PROVEN",
+    "UNOS:P1J:PLAN_ACCEPTED",
+    "UNOS:P1J:FRAMES_ALLOCATED",
+    "UNOS:P1J:HIERARCHY_MATERIALIZED",
+    "UNOS:P1J:HIERARCHY_VERIFIED",
     "UNOS:P1G:GOP_READY",
     "UNOS:P1G:BUFFERS_READY",
     "UNOS:P1G:MAP_CAPTURED",
@@ -106,8 +110,10 @@ const KERNEL_HANDOFF_MARKERS: [&str; 35] = [
     "UNOS:P1H:EXIT_READY",
     "UNOS:P1H:BOOT_SERVICES_EXITED",
     "UNOS:P1H:FINAL_MAP_CONVERTED",
+    "UNOS:P1J:FINAL_MAP_RESERVED",
     "UNOS:P1H:BOOTINFO_FINAL",
     "UNOS:P1H:OWNERSHIP_TRANSFERRED",
+    "UNOS:P1J:OWNERSHIP_TRANSFERRED",
     "UNOS:P1H:PASS",
     "UNOS:P1I:HANDOFF_READY",
     "UNOS:P1I:KERNEL_ENTRY",
@@ -115,6 +121,27 @@ const KERNEL_HANDOFF_MARKERS: [&str; 35] = [
     "UNOS:P1I:BOOTINFO_OK",
     "UNOS:P1I:MEMORY_MAP_OK",
     "UNOS:P1I:PASS",
+];
+const PAGE_TABLE_ALLOCATION_FAILURE_MARKERS: [&str; 19] = [
+    "UNOS:P1C:ENTRY",
+    "UNOS:P1C:UEFI_OK",
+    "UNOS:P1C:PASS",
+    "UNOS:P1D:KERNEL_OPEN",
+    "UNOS:P1D:KERNEL_READ",
+    "UNOS:P1D:KERNEL_VALID",
+    "UNOS:P1D:PASS",
+    "UNOS:P1E:PLAN_VALID",
+    "UNOS:P1E:SEGMENTS_ALLOCATED",
+    "UNOS:P1E:SEGMENTS_ZEROED",
+    "UNOS:P1E:SEGMENTS_COPIED",
+    "UNOS:P1E:LOAD_VERIFIED",
+    "UNOS:P1F:OWNERSHIP_READY",
+    "UNOS:P1F:METADATA_VALID",
+    "UNOS:P1F:SOURCE_RELEASED",
+    "UNOS:P1F:OWNERSHIP_PROVEN",
+    "UNOS:P1J:PLAN_ACCEPTED",
+    "UNOS:P1J:ROLLBACK_COMPLETE",
+    "UNOS:P1J:FAIL:ALLOC",
 ];
 const MISSING_MARKERS: [&str; 4] = [
     "UNOS:P1C:ENTRY",
@@ -288,6 +315,50 @@ pub fn test_kernel_handoff() -> Result<(), String> {
     println!(
         "scenario.kernel-handoff=passed; markers={}; exit={QEMU_SUCCESS_EXIT_CODE}",
         KERNEL_HANDOFF_MARKERS.join(" -> ")
+    );
+    println!("Timeout: {} seconds", HEADLESS_TIMEOUT.as_secs());
+    Ok(())
+}
+
+pub fn test_page_tables() -> Result<(), String> {
+    let kernel_path = kernel::build_kernel_for_uefi_test()?;
+    let build = build_and_stage(BuildMode::PageTableAllocationFailure)?;
+    let environment = doctor::resolve_phase1_paths()?;
+    let test_root = build.output_root.join("test-page-tables");
+    remove_directory_if_present(&test_root)?;
+    let fixture = prepare_fixture(&test_root, Scenario::Valid, &build.esp_boot, &kernel_path)?;
+    let run = prepare_run(&fixture.root, &environment.ovmf_vars_template)?;
+    let config = QemuConfig {
+        ovmf_code: &environment.ovmf_code,
+        ovmf_vars: &run.vars_copy,
+        esp: &fixture.esp,
+        serial_log: Some(&run.serial_log),
+        qemu_test: true,
+    };
+    let child = Command::new(&environment.qemu)
+        .args(qemu_arguments(&config))
+        .current_dir(repository_root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("QEMU startup failure: {error}"))?;
+    let mut child = ProcessChild(child);
+    let outcome = wait_for_child(&mut child, HEADLESS_TIMEOUT)?;
+    verify_vars_source_unchanged(&run)?;
+    let serial = fs::read_to_string(&run.serial_log)
+        .map_err(|error| format!("page-table serial log is unavailable: {error}"))?;
+    if let Some(error) = startup_failure(outcome, &serial) {
+        return Err(error);
+    }
+    classify_test_result(
+        outcome,
+        QEMU_FAILURE_EXIT_CODE,
+        validate_markers(&serial, &PAGE_TABLE_ALLOCATION_FAILURE_MARKERS),
+    )?;
+    println!(
+        "scenario.page-table-allocation-failure=passed; markers={}; exit={QEMU_FAILURE_EXIT_CODE}",
+        PAGE_TABLE_ALLOCATION_FAILURE_MARKERS.join(" -> ")
     );
     println!("Timeout: {} seconds", HEADLESS_TIMEOUT.as_secs());
     Ok(())
@@ -494,6 +565,7 @@ enum BuildMode {
     QemuTest,
     ExitBootServices,
     KernelHandoff,
+    PageTableAllocationFailure,
 }
 
 struct BuildPaths {
@@ -527,6 +599,9 @@ fn build_and_stage(mode: BuildMode) -> Result<BuildPaths, String> {
         }
         BuildMode::KernelHandoff => {
             command.args(["--features", "qemu-test,kernel-handoff-test"]);
+        }
+        BuildMode::PageTableAllocationFailure => {
+            command.args(["--features", "qemu-test,page-table-allocation-failure-test"]);
         }
     }
     let status = command
@@ -1116,6 +1191,34 @@ mod tests {
         assert_eq!(
             validate_markers(&exit_serial, &EXIT_BOOT_SERVICES_MARKERS),
             Ok(())
+        );
+        let handoff_serial = KERNEL_HANDOFF_MARKERS
+            .iter()
+            .map(|marker| format!("{marker}\r\n"))
+            .collect::<String>();
+        assert_eq!(
+            validate_markers(&handoff_serial, &KERNEL_HANDOFF_MARKERS),
+            Ok(())
+        );
+        let negative_serial = PAGE_TABLE_ALLOCATION_FAILURE_MARKERS
+            .iter()
+            .map(|marker| format!("{marker}\r\n"))
+            .collect::<String>();
+        assert_eq!(
+            validate_markers(&negative_serial, &PAGE_TABLE_ALLOCATION_FAILURE_MARKERS),
+            Ok(())
+        );
+        assert!(
+            PAGE_TABLE_ALLOCATION_FAILURE_MARKERS
+                .iter()
+                .all(|marker| !matches!(
+                    *marker,
+                    "UNOS:P1J:FRAMES_ALLOCATED"
+                        | "UNOS:P1J:HIERARCHY_MATERIALIZED"
+                        | "UNOS:P1J:HIERARCHY_VERIFIED"
+                        | "UNOS:P1J:FINAL_MAP_RESERVED"
+                        | "UNOS:P1J:OWNERSHIP_TRANSFERRED"
+                ))
         );
         for scenario in [Scenario::Missing, Scenario::Corrupt, Scenario::Policy] {
             assert!(

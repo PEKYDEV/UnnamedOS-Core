@@ -16,10 +16,11 @@ use bootloader::{
 };
 use bootloader::{
     BootDataAllocations, CONVERTED_DESCRIPTOR_CAPACITY, GopFramebuffer, GopPixelFormat,
-    LoadedKernel, MapBuildError, MapKeyStatus, PageAllocation, PageBackend, PreparedBootInfo,
-    ProvisionalMapMetadata, RAW_MEMORY_MAP_MAX_BYTES, Reservation, ReservationList,
-    ReservationSource, apply_reservations, build_boot_info, convert_framebuffer,
-    map_uefi_memory_kind, normalize_mapped_memory_map, retry_is_allowed,
+    LoadedKernel, MapBuildError, MapKeyStatus, PageAllocation, PageBackend,
+    PageTableReservationProof, PreparedBootInfo, ProvisionalMapMetadata, RAW_MEMORY_MAP_MAX_BYTES,
+    Reservation, ReservationList, ReservationSource, append_page_table_reservations,
+    apply_reservations, build_boot_info, convert_framebuffer, map_uefi_memory_kind,
+    normalize_mapped_memory_map, retry_is_allowed,
 };
 #[cfg(feature = "kernel-handoff-test")]
 use bootloader::{BootstrapStack, PhysicalRange};
@@ -30,7 +31,10 @@ use uefi::{
     proto::console::gop::{GraphicsOutput, PixelFormat},
 };
 
+#[cfg(feature = "kernel-handoff-test")]
+use crate::page_table_loader::{self, PageTableLoadError};
 use crate::serial::SerialPort;
+use memory_layout::PhysicalFrame;
 
 const RAW_MAP_PAGES: usize = RAW_MEMORY_MAP_MAX_BYTES / 4096;
 const CONVERTED_MAP_BYTES: usize = CONVERTED_DESCRIPTOR_CAPACITY * 32;
@@ -70,6 +74,8 @@ pub enum BootInfoLoadError {
     Reservation,
     Framebuffer,
     BootInfo,
+    #[cfg(feature = "kernel-handoff-test")]
+    PageTable(PageTableLoadError),
     #[cfg(not(feature = "exit-boot-services-test"))]
     Free,
 }
@@ -84,6 +90,8 @@ impl BootInfoLoadError {
             Self::Reservation => b"UNOS:P1G:FAIL:RESERVATION",
             Self::Framebuffer => b"UNOS:P1G:FAIL:FRAMEBUFFER",
             Self::BootInfo => b"UNOS:P1G:FAIL:BOOTINFO",
+            #[cfg(feature = "kernel-handoff-test")]
+            Self::PageTable(error) => error.marker(),
             #[cfg(not(feature = "exit-boot-services-test"))]
             Self::Free => b"UNOS:P1G:FAIL:FREE",
         }
@@ -95,7 +103,7 @@ pub fn prepare_validate_and_release<B: PageBackend>(
     loaded: &LoadedKernel<B>,
     serial: &mut SerialPort,
 ) -> Result<(), BootInfoLoadError> {
-    let mut prepared = prepare(loaded, serial, None)?;
+    let (mut prepared, _) = prepare(loaded, serial, None, &[])?;
     prepared
         .try_release()
         .map_err(|_| BootInfoLoadError::Free)?;
@@ -111,7 +119,14 @@ fn prepare<B: PageBackend>(
     loaded: &LoadedKernel<B>,
     serial: &mut SerialPort,
     stack: Option<PageAllocation>,
-) -> Result<PreparedBootInfo<UefiBootBackend>, BootInfoLoadError> {
+    page_table_frames: &[PhysicalFrame],
+) -> Result<
+    (
+        PreparedBootInfo<UefiBootBackend>,
+        Option<PageTableReservationProof>,
+    ),
+    BootInfoLoadError,
+> {
     let mut pending = PendingBuffers::allocate().map_err(|_| BootInfoLoadError::Alloc)?;
 
     let handle =
@@ -161,6 +176,10 @@ fn prepare<B: PageBackend>(
         stack,
     )
     .map_err(|_| BootInfoLoadError::Reservation)?;
+    if !page_table_frames.is_empty() {
+        append_page_table_reservations(page_table_frames, &mut reservations)
+            .map_err(|_| BootInfoLoadError::Reservation)?;
+    }
     reservations
         .finish()
         .map_err(|_| BootInfoLoadError::Reservation)?;
@@ -200,6 +219,17 @@ fn prepare<B: PageBackend>(
     if !reservation_evidence(&converted[..descriptor_count]) {
         return Err(BootInfoLoadError::Reservation);
     }
+    let page_table_proof = if page_table_frames.is_empty() {
+        None
+    } else {
+        Some(
+            bootloader::verify_page_table_reservations(
+                page_table_frames,
+                &converted[..descriptor_count],
+            )
+            .map_err(|_| BootInfoLoadError::Reservation)?,
+        )
+    };
     serial.write_line(RESERVATIONS_VALID_MARKER);
 
     let descriptor_version =
@@ -251,7 +281,7 @@ fn prepare<B: PageBackend>(
         return Err(BootInfoLoadError::BootInfo);
     }
     serial.write_line(OWNERSHIP_READY_MARKER);
-    Ok(prepared)
+    Ok((prepared, page_table_proof))
 }
 
 #[cfg(feature = "exit-boot-services-test")]
@@ -262,9 +292,21 @@ pub fn prepare_and_exit<B: PageBackend>(
     #[cfg(feature = "kernel-handoff-test")]
     let stack = allocate_bootstrap_stack(&loaded)?;
     #[cfg(feature = "kernel-handoff-test")]
-    let prepared = prepare(&loaded, serial, Some(stack.allocation()))?;
+    let verified_page_tables = page_table_loader::construct_inactive(&loaded, &stack, serial)
+        .map_err(BootInfoLoadError::PageTable)?;
     #[cfg(not(feature = "kernel-handoff-test"))]
-    let prepared = prepare(&loaded, serial, None)?;
+    let (prepared, _) = prepare(&loaded, serial, None, &[])?;
+    #[cfg(feature = "kernel-handoff-test")]
+    let (prepared, reservation_proof) = prepare(
+        &loaded,
+        serial,
+        Some(stack.allocation()),
+        verified_page_tables.frames(),
+    )?;
+    #[cfg(feature = "kernel-handoff-test")]
+    let page_tables = verified_page_tables
+        .confirm_final_map_reservation(reservation_proof.ok_or(BootInfoLoadError::Reservation)?)
+        .map_err(|_| BootInfoLoadError::PageTable(PageTableLoadError::Reserve))?;
     let ready = BootServicesState::new()
         .with_kernel(loaded)
         .and_then(|state| state.with_boot_information(prepared))
@@ -272,7 +314,7 @@ pub fn prepare_and_exit<B: PageBackend>(
 
     #[cfg(feature = "kernel-handoff-test")]
     let ready = ready
-        .with_bootstrap_stack(stack)
+        .with_bootstrap_stack_and_page_tables(stack, page_tables)
         .map_err(|_| BootInfoLoadError::BootInfo)?;
 
     boot::set_watchdog_timer(0, 0, None).map_err(|_| BootInfoLoadError::BootInfo)?;
@@ -404,6 +446,26 @@ fn finalize_post_exit(
         post_exit_failure(serial, b"UNOS:P1H:FAIL:FINAL_MAP");
     }
     serial.write_line(FINAL_MAP_CONVERTED_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    let page_tables = match transferred.page_tables() {
+        Some(page_tables) => page_tables,
+        None => post_exit_failure(serial, b"UNOS:P1J:FAIL:RESERVATION"),
+    };
+    #[cfg(feature = "kernel-handoff-test")]
+    if bootloader::verify_page_table_reservations(
+        page_tables.frames(),
+        &converted[..descriptor_count],
+    )
+    .is_err()
+    {
+        post_exit_failure(serial, b"UNOS:P1J:FAIL:RESERVATION");
+    }
+    #[cfg(feature = "kernel-handoff-test")]
+    let page_table_root = page_tables.root_frame().address();
+    #[cfg(feature = "kernel-handoff-test")]
+    let page_table_count = page_tables.frame_count();
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(page_table_loader::FINAL_MAP_RESERVED_MARKER);
 
     let descriptor_version = match u16::try_from(final_map.descriptor_version) {
         Ok(version) => version,
@@ -445,14 +507,22 @@ fn finalize_post_exit(
         Ok(state) => state,
         Err(_) => post_exit_failure(serial, b"UNOS:P1H:FAIL:BOOTINFO"),
     };
+    #[cfg(feature = "kernel-handoff-test")]
+    let page_table_state_valid = post_exit.page_table_root_frame() == Some(page_table_root)
+        && post_exit.page_table_frame_count() == page_table_count;
+    #[cfg(not(feature = "kernel-handoff-test"))]
+    let page_table_state_valid = post_exit.page_table_frame_count() == 0;
     if post_exit.descriptor_count() == 0
         || post_exit.boot_info_address() == 0
         || post_exit.kernel_entry() == 0
+        || !page_table_state_valid
     {
         post_exit_failure(serial, b"UNOS:P1H:FAIL:BOOTINFO");
     }
     serial.write_line(BOOTINFO_FINAL_MARKER);
     serial.write_line(OWNERSHIP_TRANSFERRED_MARKER);
+    #[cfg(feature = "kernel-handoff-test")]
+    serial.write_line(page_table_loader::OWNERSHIP_TRANSFERRED_MARKER);
     serial.write_line(PHASE_1H_PASS_MARKER);
     #[cfg(feature = "kernel-handoff-test")]
     {
@@ -493,12 +563,14 @@ fn reservation_evidence(descriptors: &[MemoryDescriptor]) -> bool {
     let mut boot_info = false;
     let mut map_buffers = 0;
     let mut bootstrap_stack = false;
+    let mut page_tables = false;
     for descriptor in descriptors {
         match descriptor.kind {
             MEMORY_KIND_KERNEL_IMAGE => kernel = true,
             MEMORY_KIND_BOOT_INFO => boot_info = true,
             MEMORY_KIND_BOOT_MEMORY_MAP => map_buffers += 1,
             MEMORY_KIND_BOOTSTRAP_STACK => bootstrap_stack = true,
+            boot_protocol::MEMORY_KIND_PAGE_TABLE => page_tables = true,
             _ => {}
         }
     }
@@ -506,6 +578,7 @@ fn reservation_evidence(descriptors: &[MemoryDescriptor]) -> bool {
         && boot_info
         && map_buffers >= 3
         && (!cfg!(feature = "kernel-handoff-test") || bootstrap_stack)
+        && (!cfg!(feature = "kernel-handoff-test") || page_tables)
 }
 
 fn reservations_for<B: PageBackend>(
@@ -645,6 +718,10 @@ fn reservations_for_transferred(
             kind: MEMORY_KIND_BOOTSTRAP_STACK,
             source: ReservationSource::BootstrapStack,
         })?;
+    }
+    if let Some(page_tables) = transferred.page_tables() {
+        append_page_table_reservations(page_tables.frames(), &mut reservations)
+            .map_err(|_| MapBuildError::ReservationCapacity)?;
     }
     Ok(reservations)
 }

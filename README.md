@@ -27,6 +27,7 @@ cargo xtask build-boot
 cargo xtask test-uefi
 cargo xtask test-exit-boot-services
 cargo xtask test-kernel-handoff
+cargo xtask test-page-tables
 ```
 
 `doctor` reports optional environment prerequisites and may return a diagnostic failure when QEMU or OVMF is missing. `check` remains the host-side quality gate. The QEMU commands use deterministic serial markers and debug-exit status codes; the final handoff scenario exits with status 33 when successful.
@@ -37,7 +38,7 @@ UnnamedOS follows a human-centered development process in which AI serves as an 
 
 Treat all current releases as experimental. Please review [CONTRIBUTING.md](CONTRIBUTING.md) before proposing changes. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), never through a public issue.
 
-Phase 1J-B adds a deterministic inactive PML4/PDPT/PD/PT construction plan, rollback-safe frame ownership, a pure CPU capability gate, and a future major-2 ownership envelope. It does not allocate production table frames, write page-table memory, probe CPU state, or modify CR3. See [docs/ROADMAP.md](docs/ROADMAP.md).
+Phase 1J-C allocates the exact UEFI `LOADER_DATA` frames for the bounded transition plan, materializes and independently verifies all table entries, reserves every owned frame in the final boot map, and transfers inactive ownership across `ExitBootServices`. The reference plan uses five table frames. CPU probing, the complete higher-half hierarchy, BootInfo v2, and CR3 modification remain deferred. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License and names
 
